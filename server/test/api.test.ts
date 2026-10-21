@@ -1,4 +1,4 @@
-import { test, beforeEach } from 'node:test'
+import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -13,9 +13,13 @@ let db: Db
 let app: ReturnType<typeof createApp>
 let codes: string[]
 
+// CI also runs this file against real Postgres (TEST_DATABASE_URL); locally it uses in-memory PGlite.
+afterEach(() => db.close())
+
 beforeEach(async () => {
   clock = new Date('2026-10-22T04:30:00Z')
-  db = await openDb() // fresh in-memory Postgres per test
+  db = await openDb({ url: process.env.TEST_DATABASE_URL }) // fresh database per test
+  if (process.env.TEST_DATABASE_URL) await db.query('TRUNCATE users, otp_codes, loans RESTART IDENTITY CASCADE')
   app = createApp({ db, jwtSecret: 'test', uploadsDir: await mkdtemp(join(tmpdir(), 'ml-')), now: () => clock })
   codes = []
   console.log = (msg: string) => { const m = /-> (\d{6})/.exec(msg); if (m) codes.push(m[1]) }

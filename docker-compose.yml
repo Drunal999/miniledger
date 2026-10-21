@@ -1,0 +1,16 @@
+# Optional: real Postgres for the API. Without it, the API uses PGlite (Postgres in WebAssembly).
+#   docker compose up -d
+#   DATABASE_URL=postgres://miniledger:miniledger@localhost:5432/miniledger npm start   (in server/)
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: miniledger
+      POSTGRES_PASSWORD: miniledger
+      POSTGRES_DB: miniledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
