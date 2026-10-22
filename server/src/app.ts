@@ -1,5 +1,8 @@
-import { Hono, type MiddlewareHandler } from 'hono'
+import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
+import { secureHeaders } from 'hono/secure-headers'
+import { bodyLimit } from 'hono/body-limit'
+import { getConnInfo } from '@hono/node-server/conninfo'
 import { SignJWT, jwtVerify } from 'jose'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
@@ -8,6 +11,7 @@ import { join } from 'node:path'
 import type { Db } from './db.ts'
 import { rupeesToPaise } from './money.ts'
 import { requestOtp, verifyOtp } from './otp.ts'
+import { rateLimiter } from './rateLimit.ts'
 
 export type Deps = {
   db: Db
@@ -41,6 +45,26 @@ const loanSchema = z.object({
 const RECEIPT_TYPES: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
 const MAX_RECEIPT_BYTES = 5 * 1024 * 1024
 
+/**
+ * Decide the image type from the file's first bytes, not from what the client claims.
+ * A script renamed to receipt.png still starts with its own bytes, so it gets rejected here.
+ */
+export function sniffImage(b: Uint8Array): string | null {
+  const starts = (sig: number[], at = 0) => sig.every((v, i) => b[at + i] === v)
+  if (starts([0xff, 0xd8, 0xff])) return 'image/jpeg'
+  if (starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png'
+  if (starts([0x52, 0x49, 0x46, 0x46]) && starts([0x57, 0x45, 0x42, 0x50], 8)) return 'image/webp' // "RIFF....WEBP"
+  return null
+}
+
+const clientIp = (c: Context) => {
+  try {
+    return getConnInfo(c).remote.address ?? 'unknown'
+  } catch {
+    return 'unknown' // in-process test requests have no socket
+  }
+}
+
 /** "Today" in India, as YYYY-MM-DD. Overdue means due_date is before this. */
 export const todayIn = (d: Date, timeZone = 'Asia/Kolkata') =>
   new Intl.DateTimeFormat('en-CA', { timeZone }).format(d)
@@ -49,6 +73,16 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
   const key = new TextEncoder().encode(jwtSecret)
   const app = new Hono<Env>()
   app.use('*', cors())
+  app.use('*', secureHeaders())
+  // Big enough for a 5 MB receipt plus form overhead; anything larger is refused before we read it.
+  app.use('*', bodyLimit({ maxSize: 6 * 1024 * 1024, onError: (c) => c.json({ error: 'Request too large' }, 413) }))
+  // Requests per IP per 10 minutes. Per-phone limits live in otp.ts; these stop one client hammering many numbers.
+  const otpLimit = rateLimiter(10, 10 * 60_000)
+  const verifyLimit = rateLimiter(30, 10 * 60_000)
+  const limited = (limit: ReturnType<typeof rateLimiter>): MiddlewareHandler => async (c, next) => {
+    if (!limit(clientIp(c), now().getTime())) return c.json({ error: 'Too many attempts, try again in a few minutes' }, 429)
+    await next()
+  }
 
   app.onError((err, c) => {
     if (err instanceof z.ZodError) return c.json({ error: err.issues[0]?.message ?? 'Invalid input' }, 400)
@@ -59,13 +93,13 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
   app.get('/health', (c) => c.json({ ok: true }))
 
   // ---- Auth: phone + mock OTP -> JWT ----
-  app.post('/auth/otp', async (c) => {
+  app.post('/auth/otp', limited(otpLimit), async (c) => {
     const { phone } = z.object({ phone: phoneSchema }).parse(await c.req.json())
     const r = await requestOtp(db, jwtSecret, phone, now())
     return r.ok ? c.json({ sent: true, phone }) : c.json({ error: r.error }, 429)
   })
 
-  app.post('/auth/verify', async (c) => {
+  app.post('/auth/verify', limited(verifyLimit), async (c) => {
     const { phone, code } = z
       .object({ phone: phoneSchema, code: z.string().regex(/^\d{6}$/, 'Code is 6 digits') })
       .parse(await c.req.json())
@@ -155,18 +189,19 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
     const body = await c.req.parseBody()
     const file = body.receipt
     if (!(file instanceof File)) return c.json({ error: 'Attach an image as "receipt"' }, 400)
-    const ext = RECEIPT_TYPES[file.type]
-    if (!ext) return c.json({ error: 'Receipt must be a JPEG, PNG or WebP image' }, 400)
     if (file.size > MAX_RECEIPT_BYTES) return c.json({ error: 'Receipt must be under 5 MB' }, 400)
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const type = sniffImage(bytes) // trust the bytes, not the client's Content-Type
+    if (!type) return c.json({ error: 'Receipt must be a JPEG, PNG or WebP image' }, 400)
 
-    const name = `${randomUUID()}.${ext}`
+    const name = `${randomUUID()}.${RECEIPT_TYPES[type]}`
     const [loan] = await db.query(
       `UPDATE loans SET receipt_file = $3 WHERE id = $1 AND user_id = $2 RETURNING ${loanFields}`,
       [id, c.get('userId'), name],
     )
     if (!loan) return c.json({ error: 'Loan not found' }, 404)
     await mkdir(uploadsDir, { recursive: true })
-    await writeFile(join(uploadsDir, name), Buffer.from(await file.arrayBuffer()))
+    await writeFile(join(uploadsDir, name), bytes)
     return c.json({ loan })
   })
 

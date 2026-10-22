@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ActivityIndicator, FlatList, Image, Modal, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, FlatList, Image, Linking, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { useNetInfo } from '@react-native-community/netinfo'
+import * as Haptics from 'expo-haptics'
 import { api, API_URL, ApiError, formatINR, type Loan, type Summary } from './api'
 import { AddLoanSheet } from './AddLoanSheet'
 import { colors } from './theme'
@@ -8,6 +9,21 @@ import { colors } from './theme'
 const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000)
 const prettyDate = (iso: string) =>
   new Date(`${iso}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+
+const DUE_SOON_DAYS = 3
+type Filter = 'all' | 'overdue' | 'repaid'
+
+// Same name -> same colour every time, so a friend is easy to spot in the list.
+const AVATAR_COLORS = ['#6366F1', '#0EA5E9', '#14B8A6', '#F59E0B', '#EC4899', '#8B5CF6', '#10B981', '#F97316']
+const avatarColor = (name: string) => AVATAR_COLORS[[...name].reduce((h, ch) => h + ch.charCodeAt(0), 0) % AVATAR_COLORS.length]
+const initials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('')
+
+/** Opens WhatsApp with a polite reminder. The user picks the chat; we never need the friend's number. */
+function remindOnWhatsApp(loan: Loan, today: string) {
+  const when = loan.dueDate < today ? `was due on ${prettyDate(loan.dueDate)}` : `is due on ${prettyDate(loan.dueDate)}`
+  const text = `Hi ${loan.friendName}, a gentle reminder about the ${formatINR(loan.amountPaise)} I lent you, which ${when}. Thanks!`
+  Linking.openURL(`https://wa.me/?text=${encodeURIComponent(text)}`)
+}
 
 export function HomeScreen({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [loans, setLoans] = useState<Loan[] | null>(null)
@@ -17,6 +33,7 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
   const [refreshing, setRefreshing] = useState(false)
   const [adding, setAdding] = useState(false)
   const [receiptFor, setReceiptFor] = useState<number | null>(null)
+  const [filter, setFilter] = useState<Filter>('all')
   const { isConnected } = useNetInfo()
   const offline = isConnected === false
 
@@ -48,6 +65,7 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
   async function markRepaid(id: number) {
     const before = loans
     setLoans((ls) => ls?.map((l) => (l.id === id ? { ...l, status: 'repaid', repaidAt: new Date().toISOString() } : l)) ?? null)
+    if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
     try {
       await api(`/loans/${id}/repay`, { method: 'PATCH' }, token)
       await load()
@@ -61,12 +79,19 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
     return <View style={styles.center}><ActivityIndicator size="large" color={colors.brand} /></View>
   }
 
+  const counts = {
+    all: loans?.length ?? 0,
+    overdue: loans?.filter((l) => l.status === 'overdue').length ?? 0,
+    repaid: loans?.filter((l) => l.status === 'repaid').length ?? 0,
+  }
+  const shown = (loans ?? []).filter((l) => filter === 'all' || l.status === filter)
+
   return (
     <View style={styles.screen}>
       {offline && <Text style={styles.offline}>You're offline. Showing the last saved list.</Text>}
 
       <FlatList
-        data={loans ?? []}
+        data={shown}
         keyExtractor={(l) => String(l.id)}
         contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
@@ -82,13 +107,23 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
                 <Text style={styles.errorText}>{error} Tap to retry.</Text>
               </Pressable>
             )}
-            <Text style={styles.section}>Loans</Text>
+            <View style={styles.tabs}>
+              {(['all', 'overdue', 'repaid'] as const).map((f) => (
+                <Pressable key={f} style={[styles.tab, filter === f && styles.tabActive]} onPress={() => setFilter(f)}>
+                  <Text style={[styles.tabText, filter === f && styles.tabTextActive]}>
+                    {f[0].toUpperCase() + f.slice(1)} ({counts[f]})
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
           </>
         }
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Text style={styles.emptyTitle}>No loans yet</Text>
-            <Text style={styles.muted}>Tap "+ Add loan" to record money you lent a friend.</Text>
+            <Text style={styles.emptyTitle}>{filter === 'all' ? 'No loans yet' : `No ${filter} loans`}</Text>
+            <Text style={styles.muted}>
+              {filter === 'all' ? 'Tap "+ Add loan" to record money you lent a friend.' : 'Nothing here right now.'}
+            </Text>
           </View>
         }
         renderItem={({ item }) => (
@@ -97,6 +132,7 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
             today={today}
             disabled={offline}
             onRepay={() => markRepaid(item.id)}
+            onRemind={() => remindOnWhatsApp(item, today)}
             onReceipt={() => setReceiptFor(item.id)}
           />
         )}
@@ -126,10 +162,15 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
 
 function SummaryCard({ s }: { s: Summary }) {
   const outstanding = s.totalLentPaise - s.totalRepaidPaise
+  const repaidShare = s.totalLentPaise ? s.totalRepaidPaise / s.totalLentPaise : 0
   return (
     <View style={styles.card}>
       <Text style={styles.cardLabel}>Still to get back</Text>
       <Text style={styles.cardBig}>{formatINR(outstanding)}</Text>
+      <View style={styles.bar}>
+        <View style={[styles.barFill, { width: `${Math.round(repaidShare * 100)}%` }]} />
+      </View>
+      <Text style={styles.barLabel}>{Math.round(repaidShare * 100)}% repaid</Text>
       <View style={styles.cardRow}>
         <Stat label="Total lent" value={formatINR(s.totalLentPaise)} />
         <Stat label="Repaid" value={formatINR(s.totalRepaidPaise)} />
@@ -146,28 +187,37 @@ const Stat = ({ label, value, danger }: { label: string; value: string; danger?:
   </View>
 )
 
-function LoanRow({ loan, today, disabled, onRepay, onReceipt }: {
+function LoanRow({ loan, today, disabled, onRepay, onRemind, onReceipt }: {
   loan: Loan
   today: string
   disabled: boolean
   onRepay: () => void
+  onRemind: () => void
   onReceipt: () => void
 }) {
   const overdue = loan.status === 'overdue'
   const repaid = loan.status === 'repaid'
-  const late = overdue ? daysBetween(loan.dueDate, today) : 0
+  const daysLeft = daysBetween(today, loan.dueDate)
+  const dueSoon = !repaid && !overdue && daysLeft <= DUE_SOON_DAYS
+  const late = overdue ? -daysLeft : 0
   const sub = repaid
     ? 'Repaid'
     : overdue
       ? `Overdue by ${late} day${late === 1 ? '' : 's'} · was due ${prettyDate(loan.dueDate)}`
-      : loan.dueDate === today ? 'Due today' : `Due ${prettyDate(loan.dueDate)}`
+      : daysLeft === 0 ? 'Due today' : dueSoon ? `Due in ${daysLeft} day${daysLeft === 1 ? '' : 's'}` : `Due ${prettyDate(loan.dueDate)}`
 
   return (
-    <View style={[styles.row, overdue && styles.rowOverdue, repaid && styles.rowRepaid]}>
+    <View style={[styles.row, overdue && styles.rowOverdue, dueSoon && styles.rowSoon, repaid && styles.rowRepaid]}>
+      <View style={[styles.avatar, { backgroundColor: avatarColor(loan.friendName) }]}>
+        <Text style={styles.avatarText}>{initials(loan.friendName)}</Text>
+      </View>
       <View style={{ flex: 1 }}>
         <Text style={[styles.name, repaid && styles.strike]}>{loan.friendName}</Text>
-        <Text style={[styles.sub, overdue && { color: colors.danger, fontWeight: '600' }, repaid && { color: colors.ok }]}>{sub}</Text>
-        {loan.hasReceipt && <Pressable onPress={onReceipt}><Text style={styles.link}>View receipt</Text></Pressable>}
+        <Text style={[styles.sub, overdue && { color: colors.danger, fontWeight: '600' }, dueSoon && { color: colors.warn, fontWeight: '600' }, repaid && { color: colors.ok }]}>{sub}</Text>
+        <View style={styles.actions}>
+          {loan.hasReceipt && <Pressable onPress={onReceipt} hitSlop={8}><Text style={styles.link}>Receipt</Text></Pressable>}
+          {!repaid && <Pressable onPress={onRemind} hitSlop={8}><Text style={styles.link}>Remind on WhatsApp</Text></Pressable>}
+        </View>
       </View>
       <View style={{ alignItems: 'flex-end', gap: 8 }}>
         <Text style={[styles.amount, overdue && { color: colors.danger }]}>{formatINR(loan.amountPaise)}</Text>
@@ -187,25 +237,36 @@ const styles = StyleSheet.create({
   offline: { backgroundColor: '#FEF3C7', color: '#92400E', padding: 10, textAlign: 'center' },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, marginTop: 8 },
   brand: { fontSize: 24, fontWeight: '800', color: colors.ink },
-  link: { color: colors.brand, marginTop: 4 },
+  link: { color: colors.brand, fontWeight: '600', fontSize: 13 },
   card: { backgroundColor: colors.ink, borderRadius: 20, padding: 20 },
   cardLabel: { color: '#9CA3AF', fontSize: 13 },
   cardBig: { color: '#fff', fontSize: 34, fontWeight: '800', marginVertical: 6 },
-  cardRow: { flexDirection: 'row', marginTop: 12, gap: 8 },
+  bar: { height: 6, backgroundColor: '#374151', borderRadius: 3, overflow: 'hidden', marginTop: 4 },
+  barFill: { height: 6, backgroundColor: '#34D399', borderRadius: 3 },
+  barLabel: { color: '#9CA3AF', fontSize: 12, marginTop: 6 },
+  cardRow: { flexDirection: 'row', marginTop: 14, gap: 8 },
   statLabel: { color: '#9CA3AF', fontSize: 12 },
   statValue: { color: '#fff', fontSize: 15, fontWeight: '700', marginTop: 2 },
   errorBox: { backgroundColor: colors.dangerBg, borderRadius: 12, padding: 12, marginTop: 12 },
   errorText: { color: colors.danger },
-  section: { fontSize: 16, fontWeight: '700', color: colors.ink, marginTop: 24, marginBottom: 8 },
+  tabs: { flexDirection: 'row', gap: 8, marginTop: 20, marginBottom: 12 },
+  tab: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20, backgroundColor: '#fff', borderWidth: 1, borderColor: colors.line },
+  tabActive: { backgroundColor: colors.ink, borderColor: colors.ink },
+  tabText: { color: colors.ink, fontWeight: '600', fontSize: 13 },
+  tabTextActive: { color: '#fff' },
   empty: { alignItems: 'center', padding: 32 },
   emptyTitle: { fontSize: 18, fontWeight: '700', color: colors.ink, marginBottom: 4 },
   muted: { color: colors.muted, textAlign: 'center' },
-  row: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
   rowOverdue: { backgroundColor: colors.dangerBg, borderColor: '#FECACA', borderLeftWidth: 4, borderLeftColor: colors.danger },
+  rowSoon: { borderLeftWidth: 4, borderLeftColor: colors.warn },
   rowRepaid: { opacity: 0.6 },
+  avatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  avatarText: { color: '#fff', fontWeight: '800' },
   name: { fontSize: 16, fontWeight: '700', color: colors.ink },
   strike: { textDecorationLine: 'line-through' },
   sub: { fontSize: 13, color: colors.muted, marginTop: 2 },
+  actions: { flexDirection: 'row', gap: 14, marginTop: 6 },
   amount: { fontSize: 17, fontWeight: '800', color: colors.ink },
   repay: { backgroundColor: colors.ok, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10 },
   repayText: { color: '#fff', fontWeight: '700', fontSize: 12 },

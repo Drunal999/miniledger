@@ -71,6 +71,22 @@ test('otp: locks after 5 wrong tries even if the 6th is right', async () => {
   assert.equal((await call('POST', '/auth/verify', { phone: '9876543210', code })).status, 401)
 })
 
+test('rate limit: one client cannot request codes for many numbers', async () => {
+  for (let i = 0; i < 10; i++) {
+    assert.equal((await call('POST', '/auth/otp', { phone: `90000000${String(i).padStart(2, '0')}` })).status, 200)
+  }
+  const res = await call('POST', '/auth/otp', { phone: '9000000099' })
+  assert.equal(res.status, 429)
+  clock = new Date(clock.getTime() + 11 * 60_000) // window resets after 10 minutes
+  assert.equal((await call('POST', '/auth/otp', { phone: '9000000099' })).status, 200)
+})
+
+test('security headers are set on every response', async () => {
+  const res = await call('GET', '/health')
+  assert.equal(res.headers.get('X-Content-Type-Options'), 'nosniff')
+  assert.equal(res.headers.get('X-Frame-Options'), 'SAMEORIGIN')
+})
+
 test('loans need a token', async () => {
   assert.equal((await call('GET', '/loans')).status, 401)
   assert.equal((await call('GET', '/loans', undefined, 'not-a-token')).status, 401)
@@ -143,8 +159,11 @@ test('receipt: accepts an image, rejects other files, serves it back only to the
     form.append('receipt', file)
     return app.request(`/loans/${loan.id}/receipt`, { method: 'POST', headers: { Authorization: `Bearer ${t}` }, body: form })
   }
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])
   assert.equal((await upload(new File(['hi'], 'a.txt', { type: 'text/plain' }))).status, 400)
-  assert.equal((await upload(new File([new Uint8Array([0x89, 0x50])], 'r.png', { type: 'image/png' }))).status, 200)
+  // A script that *claims* to be a PNG is still rejected: we check the file's bytes, not its label.
+  assert.equal((await upload(new File(['<script>alert(1)</script>'], 'r.png', { type: 'image/png' }))).status, 400)
+  assert.equal((await upload(new File([png], 'r.png', { type: 'image/png' }))).status, 200)
 
   const res = await call('GET', `/loans/${loan.id}/receipt`, undefined, t)
   assert.equal(res.status, 200)

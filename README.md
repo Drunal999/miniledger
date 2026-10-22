@@ -47,7 +47,7 @@ Scan the QR code with Expo Go on your phone (same Wi-Fi as the laptop). Use your
 
 ```bash
 cd server
-npm test        # 10 tests, about 20 seconds
+npm test        # 12 tests, about 25 seconds
 npm run typecheck
 ```
 
@@ -58,8 +58,11 @@ CI runs the same tests on every push, once on PGlite and once on a real Postgres
 - Log in with your phone number and a one-time code
 - Add a loan: friend's name, amount, due date, and optionally a photo of the receipt
 - See every loan, with overdue ones in red ("Overdue by 4 days")
-- Mark a loan as repaid
-- A summary card at the top: still to get back, total lent, repaid, overdue
+- Mark a loan as repaid (with a small vibration on the phone)
+- A summary card at the top: still to get back, total lent, repaid, overdue, and how much has come back so far
+- Filter the list: all, overdue, repaid
+- Loans due in the next 3 days are marked "Due in 2 days" in amber, before they turn red
+- "Remind on WhatsApp" opens WhatsApp with a polite reminder ready to send. You pick the chat, so the app never needs your friend's number
 
 The app also handles the unhappy paths: loading spinners, a clear message when the server says no, an empty state, pull to refresh, and an offline banner that keeps the last list on screen and disables changes until you're back online.
 
@@ -85,7 +88,13 @@ Swapping in a real SMS provider means changing one `console.log` line.
 
 **Validation lives at the edge.** Zod checks every request body and returns the first readable message ("Amount must be more than 0, with at most 2 decimals"), which the app shows as is. The database has `CHECK` constraints as a second line of defence.
 
-**Receipts.** JPEG, PNG or WebP up to 5 MB, stored with a random file name, and only served back to the loan's owner.
+**Receipts.** JPEG, PNG or WebP up to 5 MB, stored with a random file name, and only served back to the loan's owner. The server decides the type from the file's first bytes, not from what the client says, so a script renamed to `receipt.png` is rejected.
+
+**Other hardening.**
+- Login endpoints are rate-limited per IP: 10 code requests and 30 attempts per 10 minutes. That's on top of the per-phone limits.
+- Every response gets security headers (`nosniff`, frame protection and others).
+- Request bodies over 6 MB are refused before they're read.
+- The server refuses to start in production without a real `JWT_SECRET`.
 
 ## API
 
@@ -112,6 +121,7 @@ server/
   src/db.ts        Postgres or PGlite, same interface
   src/money.ts     rupees -> paise without floats
   src/otp.ts       create and check one-time codes
+  src/rateLimit.ts per-IP limit for the login endpoints
   src/app.ts       routes, auth middleware, validation
   src/index.ts     starts the server
   test/            API tests (node:test)
@@ -128,5 +138,5 @@ app/
 - Partial repayments (a `payments` table instead of a single `repaid_at`)
 - Reminders: a daily job that notifies you about loans due tomorrow
 - Store receipts in S3 or R2 instead of the local disk
-- Rate-limit `/auth/otp` per IP as well as per phone
+- Move the rate limiter to Redis so it works across several servers
 - Refresh tokens, so you aren't logged out after 7 days
