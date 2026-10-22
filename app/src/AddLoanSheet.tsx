@@ -23,6 +23,15 @@ async function uploadReceipt(loanId: number, photo: Photo, token: string) {
   return api<{ loan: Loan }>(`/loans/${loanId}/receipt`, { method: 'POST', body: form }, token)
 }
 
+/** "Sat, 21 Nov · in 30 days" instead of the raw "Sat Nov 21 2026". */
+function friendlyDue(d: Date) {
+  const start = new Date(); start.setHours(0, 0, 0, 0)
+  const day = new Date(d); day.setHours(0, 0, 0, 0)
+  const n = Math.round((day.getTime() - start.getTime()) / 86_400_000)
+  const rel = n === 0 ? 'today' : n === 1 ? 'tomorrow' : n > 1 ? `in ${n} days` : `${-n} day${n === -1 ? '' : 's'} ago`
+  return `${d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })} · ${rel}`
+}
+
 const DUE_PRESETS: [string, number][] = [['1 week', 7], ['2 weeks', 14], ['1 month', 30]]
 
 /** "1500.5" -> "₹1,500.50" while typing, or null if it isn't a valid amount yet. */
@@ -128,7 +137,7 @@ export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }
         ) : (
           <>
             <Pressable style={styles.input} onPress={() => setShowPicker(true)}>
-              <Text style={styles.inputText}>{due.toDateString()}</Text>
+              <Text style={styles.inputText}>{friendlyDue(due)}</Text>
             </Pressable>
             {showPicker && (
               <DateTimePicker
@@ -157,7 +166,7 @@ export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }
 
         {error && <Text style={styles.error}>{error}</Text>}
 
-        <Pressable style={[styles.button, busy && { opacity: 0.5 }]} disabled={busy} onPress={save}>
+        <Pressable style={({ pressed }) => [styles.button, busy && { opacity: 0.5 }, pressed && { opacity: 0.7 }]} disabled={busy} onPress={save} accessibilityRole="button" accessibilityLabel="Save loan">
           {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Save loan</Text>}
         </Pressable>
       </ScrollView>

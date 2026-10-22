@@ -138,12 +138,15 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
       <FlatList
         data={shown}
         keyExtractor={(l) => String(l.id)}
-        contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
+        contentContainerStyle={{ padding: 16, paddingBottom: 150 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
         ListHeaderComponent={
           <>
             <View style={styles.topBar}>
-              <Text style={styles.brand}>MiniLedger</Text>
+              <View>
+                <Text style={styles.brand}>MiniLedger</Text>
+                {today ? <Text style={styles.today}>{new Date(`${today}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}</Text> : null}
+              </View>
               <Pressable onPress={onLogout} hitSlop={12}><Text style={styles.link}>Log out</Text></Pressable>
             </View>
             {summary && <SummaryCard s={summary} />}
@@ -154,7 +157,7 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
             )}
             <View style={styles.tabs}>
               {(['all', 'overdue', 'repaid'] as const).map((f) => (
-                <Pressable key={f} style={[styles.tab, filter === f && styles.tabActive]} onPress={() => setFilter(f)}>
+                <Pressable key={f} style={({ pressed }) => [styles.tab, filter === f && styles.tabActive, pressed && styles.pressed]} onPress={() => setFilter(f)}>
                   <Text style={[styles.tabText, filter === f && styles.tabTextActive]}>
                     {f[0].toUpperCase() + f.slice(1)} ({counts[f]})
                   </Text>
@@ -195,7 +198,7 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
       )}
 
       {!undo && (
-        <Pressable style={[styles.fab, offline && { opacity: 0.4 }]} disabled={offline} onPress={() => setAdding(true)} accessibilityRole="button" accessibilityLabel="Add loan">
+        <Pressable style={({ pressed }) => [styles.fab, offline && { opacity: 0.4 }, pressed && styles.pressed]} disabled={offline} onPress={() => setAdding(true)} accessibilityRole="button" accessibilityLabel="Add loan">
           <Text style={styles.fabText}>+ Add loan</Text>
         </Pressable>
       )}
@@ -259,39 +262,66 @@ function LoanRow({ loan, today, disabled, onRepay, onRemind, onReceipt, onDelete
   const daysLeft = daysBetween(today, loan.dueDate)
   const dueSoon = !repaid && !overdue && daysLeft <= DUE_SOON_DAYS
   const late = overdue ? -daysLeft : 0
-  const sub = repaid
-    ? 'Repaid'
+  const plural = (n: number) => `${n} day${n === 1 ? '' : 's'}`
+  // Short status for the pill; the full date sits next to it in grey.
+  const pill = repaid
+    ? { text: 'Repaid', fg: colors.ok, bg: '#ECFDF5' }
     : overdue
-      ? `Overdue by ${late} day${late === 1 ? '' : 's'} · was due ${prettyDate(loan.dueDate)}`
-      : daysLeft === 0 ? 'Due today' : dueSoon ? `Due in ${daysLeft} day${daysLeft === 1 ? '' : 's'}` : `Due ${prettyDate(loan.dueDate)}`
+      ? { text: `${plural(late)} late`, fg: colors.danger, bg: '#FEE2E2' }
+      : daysLeft === 0
+        ? { text: 'Due today', fg: colors.warn, bg: '#FEF3C7' }
+        : dueSoon
+          ? { text: `Due in ${plural(daysLeft)}`, fg: colors.warn, bg: '#FEF3C7' }
+          : { text: 'Upcoming', fg: colors.muted, bg: '#F3F4F6' }
+  const dateLabel = repaid ? `was due ${prettyDate(loan.dueDate)}` : prettyDate(loan.dueDate)
 
   return (
     <Pressable
       onLongPress={disabled ? undefined : onDelete}
       delayLongPress={500}
-      accessibilityLabel={`${loan.friendName}, ${formatINR(loan.amountPaise)}, ${sub}`}
+      accessibilityLabel={`${loan.friendName}, ${formatINR(loan.amountPaise)}, ${pill.text}, due ${prettyDate(loan.dueDate)}`}
       accessibilityHint="Press and hold to delete"
-      style={[styles.row, overdue && styles.rowOverdue, dueSoon && styles.rowSoon, repaid && styles.rowRepaid]}
+      style={({ pressed }) => [styles.row, overdue && styles.rowOverdue, dueSoon && styles.rowSoon, repaid && styles.rowRepaid, pressed && styles.pressed]}
     >
-      <View style={[styles.avatar, { backgroundColor: avatarColor(loan.friendName) }]}>
-        <Text style={styles.avatarText}>{initials(loan.friendName)}</Text>
-      </View>
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.name, repaid && styles.strike]}>{loan.friendName}</Text>
-        <Text style={[styles.sub, overdue && { color: colors.danger, fontWeight: '600' }, dueSoon && { color: colors.warn, fontWeight: '600' }, repaid && { color: colors.ok }]}>{sub}</Text>
-        <View style={styles.actions}>
-          {loan.hasReceipt && <Pressable onPress={onReceipt} hitSlop={8}><Text style={styles.link}>Receipt</Text></Pressable>}
-          {!repaid && <Pressable onPress={onRemind} hitSlop={8}><Text style={styles.link}>Remind on WhatsApp</Text></Pressable>}
+      <View style={styles.rowTop}>
+        <View style={[styles.avatar, { backgroundColor: avatarColor(loan.friendName) }]}>
+          <Text style={styles.avatarText}>{initials(loan.friendName)}</Text>
         </View>
-      </View>
-      <View style={{ alignItems: 'flex-end', gap: 8 }}>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.name, repaid && styles.strike]} numberOfLines={1}>{loan.friendName}</Text>
+          <View style={styles.metaRow}>
+            <Text style={[styles.pill, { color: pill.fg, backgroundColor: pill.bg }]}>{pill.text}</Text>
+            <Text style={styles.date} numberOfLines={1}>{dateLabel}</Text>
+          </View>
+        </View>
         <Text style={[styles.amount, overdue && { color: colors.danger }]}>{formatINR(loan.amountPaise)}</Text>
-        {!repaid && (
-          <Pressable style={[styles.repay, disabled && { opacity: 0.4 }]} disabled={disabled} onPress={onRepay} accessibilityRole="button" accessibilityLabel={`Mark ${loan.friendName}'s loan as repaid`}>
-            <Text style={styles.repayText}>Mark repaid</Text>
-          </Pressable>
-        )}
       </View>
+
+      {(!repaid || loan.hasReceipt) && (
+        <View style={styles.actions}>
+          {!repaid && (
+            <Pressable
+              style={({ pressed }) => [styles.repay, disabled && { opacity: 0.4 }, pressed && styles.pressed]}
+              disabled={disabled}
+              onPress={onRepay}
+              accessibilityRole="button"
+              accessibilityLabel={`Mark ${loan.friendName}'s loan as repaid`}
+            >
+              <Text style={styles.repayText}>✓ Repaid</Text>
+            </Pressable>
+          )}
+          {!repaid && (
+            <Pressable style={({ pressed }) => [styles.action, pressed && styles.pressed]} onPress={onRemind} accessibilityRole="button" accessibilityLabel={`Remind ${loan.friendName} on WhatsApp`}>
+              <Text style={styles.remindText}>Remind</Text>
+            </Pressable>
+          )}
+          {loan.hasReceipt && (
+            <Pressable style={({ pressed }) => [styles.action, pressed && styles.pressed]} onPress={onReceipt} accessibilityRole="button" accessibilityLabel="View receipt">
+              <Text style={styles.receiptText}>Receipt</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
     </Pressable>
   )
 }
@@ -302,6 +332,7 @@ const styles = StyleSheet.create({
   offline: { backgroundColor: '#FEF3C7', color: '#92400E', padding: 10, textAlign: 'center' },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, marginTop: 8 },
   brand: { fontSize: 24, fontWeight: '800', color: colors.ink },
+  today: { fontSize: 13, color: colors.muted, marginTop: 2 },
   link: { color: colors.brand, fontWeight: '600', fontSize: 13 },
   card: { backgroundColor: colors.ink, borderRadius: 20, padding: 20 },
   cardLabel: { color: '#9CA3AF', fontSize: 13 },
@@ -322,7 +353,12 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', padding: 32 },
   emptyTitle: { fontSize: 18, fontWeight: '700', color: colors.ink, marginBottom: 4 },
   muted: { color: colors.muted, textAlign: 'center' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  row: { backgroundColor: '#fff', borderRadius: 16, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  rowTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
+  pill: { fontSize: 12, fontWeight: '700', paddingVertical: 2, paddingHorizontal: 8, borderRadius: 10, overflow: 'hidden' },
+  date: { fontSize: 12, color: colors.muted, flexShrink: 1 },
+  pressed: { opacity: 0.6 },
   rowOverdue: { backgroundColor: colors.dangerBg, borderColor: '#FECACA', borderLeftWidth: 4, borderLeftColor: colors.danger },
   rowSoon: { borderLeftWidth: 4, borderLeftColor: colors.warn },
   rowRepaid: { opacity: 0.6 },
@@ -330,11 +366,13 @@ const styles = StyleSheet.create({
   avatarText: { color: '#fff', fontWeight: '800' },
   name: { fontSize: 16, fontWeight: '700', color: colors.ink },
   strike: { textDecorationLine: 'line-through' },
-  sub: { fontSize: 13, color: colors.muted, marginTop: 2 },
-  actions: { flexDirection: 'row', gap: 14, marginTop: 6 },
+  actions: { flexDirection: 'row', gap: 8, marginTop: 12, marginLeft: 52 },
+  action: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line },
+  remindText: { color: '#128C7E', fontWeight: '700', fontSize: 13 },
+  receiptText: { color: colors.brand, fontWeight: '700', fontSize: 13 },
   amount: { fontSize: 17, fontWeight: '800', color: colors.ink },
-  repay: { backgroundColor: colors.ok, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10 },
-  repayText: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  repay: { borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12, borderWidth: 1, borderColor: '#A7F3D0', backgroundColor: '#ECFDF5' },
+  repayText: { color: colors.ok, fontWeight: '700', fontSize: 13 },
   fab: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: colors.brand, borderRadius: 28, paddingVertical: 16, paddingHorizontal: 28, elevation: 4 },
   fabText: { color: '#fff', fontWeight: '800', fontSize: 16 },
   footerHint: { color: colors.muted, textAlign: 'center', fontSize: 12, marginTop: 8 },
