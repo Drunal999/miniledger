@@ -8,7 +8,12 @@ Track money you've lent to friends: who owes you, how much, and who's late.
 - **App:** React Native (Expo)
 - **Demo video:** _link here_
 
-<!-- screenshots: login, list with an overdue loan, add form -->
+<p>
+  <img src="docs/screenshots/home.jpg" width="200" alt="Home: summary card, filters, overdue loans in red, due-soon in amber">
+  <img src="docs/screenshots/add-loan.jpg" width="200" alt="Add a loan: recent friends, amount preview, due-date presets, receipt photo">
+  <img src="docs/screenshots/login.jpg" width="200" alt="Login with phone number">
+  <img src="docs/screenshots/otp.jpg" width="200" alt="One-time code with resend countdown">
+</p>
 
 ## Run it
 
