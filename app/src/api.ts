@@ -9,20 +9,26 @@ export type Loan = {
   id: number
   friendName: string
   amountPaise: number
+  paidPaise: number
   dueDate: string
   repaidAt: string | null
   hasReceipt: boolean
+  createdAt: string
   status: LoanStatus
 }
+export type Payment = { id: number; amountPaise: number; paidAt: string }
 export type Summary = { totalLentPaise: number; totalRepaidPaise: number; overduePaise: number; overdueCount: number }
+export type Profile = { phone: string; upiId: string | null }
 
-// The login token lives in the phone's encrypted keystore. SecureStore has no web version, so web uses localStorage.
-const TOKEN_KEY = 'miniledger.token'
-export const tokenStore = {
-  get: () => (Platform.OS === 'web' ? Promise.resolve(localStorage.getItem(TOKEN_KEY)) : SecureStore.getItemAsync(TOKEN_KEY)),
-  set: (t: string) => (Platform.OS === 'web' ? Promise.resolve(localStorage.setItem(TOKEN_KEY, t)) : SecureStore.setItemAsync(TOKEN_KEY, t)),
-  clear: () => (Platform.OS === 'web' ? Promise.resolve(localStorage.removeItem(TOKEN_KEY)) : SecureStore.deleteItemAsync(TOKEN_KEY)),
+// Small values (login token, app-lock setting) live in the phone's encrypted keystore.
+// SecureStore has no web version, so web falls back to localStorage.
+export const secure = {
+  get: (k: string) => (Platform.OS === 'web' ? Promise.resolve(localStorage.getItem(k)) : SecureStore.getItemAsync(k)),
+  set: (k: string, v: string) => (Platform.OS === 'web' ? Promise.resolve(localStorage.setItem(k, v)) : SecureStore.setItemAsync(k, v)),
+  del: (k: string) => (Platform.OS === 'web' ? Promise.resolve(localStorage.removeItem(k)) : SecureStore.deleteItemAsync(k)),
 }
+export const TOKEN_KEY = 'miniledger.token'
+export const LOCK_KEY = 'miniledger.lock'
 
 export class ApiError extends Error {
   constructor(message: string, public status: number) {
@@ -45,11 +51,22 @@ export async function api<T>(path: string, init: RequestInit = {}, token?: strin
   } catch {
     throw new ApiError("Can't reach the server. Check your connection.", 0)
   }
+  if (res.status === 204) return undefined as T
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new ApiError(data.error ?? `Request failed (${res.status})`, res.status)
   return data as T
 }
 
-/** Paise to "₹1,500.50" with Indian digit grouping. */
-export const formatINR = (paise: number) =>
-  new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: paise % 100 ? 2 : 0 }).format(paise / 100)
+export type Photo = { uri: string; mimeType?: string; fileName?: string | null }
+
+/** Uploads a receipt photo as multipart form data. Native takes {uri,name,type}; web needs a real Blob. */
+export async function uploadReceipt(loanId: number, photo: Photo, token: string) {
+  const form = new FormData()
+  const type = photo.mimeType ?? 'image/jpeg'
+  if (Platform.OS === 'web') {
+    form.append('receipt', await (await fetch(photo.uri)).blob(), photo.fileName ?? 'receipt.jpg')
+  } else {
+    form.append('receipt', { uri: photo.uri, name: photo.fileName ?? 'receipt.jpg', type } as unknown as Blob)
+  }
+  return api<{ loan: Loan }>(`/loans/${loanId}/receipt`, { method: 'POST', body: form }, token)
+}

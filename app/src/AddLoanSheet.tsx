@@ -2,26 +2,13 @@ import { useState } from 'react'
 import { ActivityIndicator, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import DateTimePicker from '@react-native-community/datetimepicker'
 import * as ImagePicker from 'expo-image-picker'
-import { api, formatINR, type Loan } from './api'
+import { api, uploadReceipt, type Loan, type Photo } from './api'
+import { formatINR, parsePaise } from './format'
 import { colors } from './theme'
-
-type Photo = { uri: string; mimeType?: string; fileName?: string | null }
 
 const toISODate = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const inDays = (n: number) => new Date(Date.now() + n * 86_400_000)
-
-/** Uploads the photo as multipart form data. Native takes {uri,name,type}; web needs a real Blob. */
-async function uploadReceipt(loanId: number, photo: Photo, token: string) {
-  const form = new FormData()
-  const type = photo.mimeType ?? 'image/jpeg'
-  if (Platform.OS === 'web') {
-    form.append('receipt', await (await fetch(photo.uri)).blob(), photo.fileName ?? 'receipt.jpg')
-  } else {
-    form.append('receipt', { uri: photo.uri, name: photo.fileName ?? 'receipt.jpg', type } as unknown as Blob)
-  }
-  return api<{ loan: Loan }>(`/loans/${loanId}/receipt`, { method: 'POST', body: form }, token)
-}
 
 /** "Sat, 21 Nov · in 30 days" instead of the raw "Sat Nov 21 2026". */
 function friendlyDue(d: Date) {
@@ -36,9 +23,8 @@ const DUE_PRESETS: [string, number][] = [['1 week', 7], ['2 weeks', 14], ['1 mon
 
 /** "1500.5" -> "₹1,500.50" while typing, or null if it isn't a valid amount yet. */
 function previewAmount(a: string) {
-  if (!/^\d{1,9}(\.\d{1,2})?$/.test(a.trim())) return null
-  const [r, p = ''] = a.trim().split('.')
-  return formatINR(Number(r) * 100 + Number(p.padEnd(2, '0')))
+  const paise = parsePaise(a)
+  return paise ? formatINR(paise) : null
 }
 
 export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }: {

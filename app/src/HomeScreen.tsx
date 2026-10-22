@@ -1,58 +1,34 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ActivityIndicator, Alert, FlatList, Image, Linking, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ActivityIndicator, FlatList, Linking, Platform, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useNetInfo } from '@react-native-community/netinfo'
 import * as Haptics from 'expo-haptics'
-import { api, API_URL, ApiError, formatINR, type Loan, type Summary } from './api'
+import { api, ApiError, type Loan, type Profile, type Summary } from './api'
 import { AddLoanSheet } from './AddLoanSheet'
-import { colors } from './theme'
+import { FriendRow, groupByFriend } from './FriendsList'
+import { LoanDetailSheet } from './LoanDetailSheet'
+import { LoanRow } from './LoanRow'
+import { ProfileSheet } from './ProfileSheet'
+import { formatINR, reminderText } from './format'
+import { colors, money } from './theme'
+import { Avatar, ProgressBar } from './ui'
 
-const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000)
-const prettyDate = (iso: string) =>
-  new Date(`${iso}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
-
-const DUE_SOON_DAYS = 3
+type Tab = 'loans' | 'friends'
 type Filter = 'all' | 'overdue' | 'repaid'
-
-// Same name -> same colour every time, so a friend is easy to spot in the list.
-const AVATAR_COLORS = ['#6366F1', '#0EA5E9', '#14B8A6', '#F59E0B', '#EC4899', '#8B5CF6', '#10B981', '#F97316']
-const avatarColor = (name: string) => AVATAR_COLORS[[...name].reduce((h, ch) => h + ch.charCodeAt(0), 0) % AVATAR_COLORS.length]
-const initials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('')
-
-/** Opens WhatsApp with a polite reminder. The user picks the chat; we never need the friend's number. */
-function remindOnWhatsApp(loan: Loan, today: string) {
-  const when = loan.dueDate < today ? `was due on ${prettyDate(loan.dueDate)}` : `is due on ${prettyDate(loan.dueDate)}`
-  const text = `Hi ${loan.friendName}, a gentle reminder about the ${formatINR(loan.amountPaise)} I lent you, which ${when}. Thanks!`
-  Linking.openURL(`https://wa.me/?text=${encodeURIComponent(text)}`)
-}
-
-/** Native confirm dialog on phones; the browser's confirm() on web, where Alert buttons don't exist. */
-function confirmAsync(title: string, message: string, action: string) {
-  if (Platform.OS === 'web') return Promise.resolve(window.confirm(`${title}\n\n${message}`))
-  return new Promise<boolean>((resolve) =>
-    Alert.alert(title, message, [
-      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-      { text: action, style: 'destructive', onPress: () => resolve(true) },
-    ]),
-  )
-}
 
 export function HomeScreen({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [loans, setLoans] = useState<Loan[] | null>(null)
   const [today, setToday] = useState('')
   const [summary, setSummary] = useState<Summary | null>(null)
+  const [profile, setProfile] = useState<Profile | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
-  const [adding, setAdding] = useState(false)
-  const [receiptFor, setReceiptFor] = useState<number | null>(null)
+  const [tab, setTab] = useState<Tab>('loans')
   const [filter, setFilter] = useState<Filter>('all')
+  const [search, setSearch] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [openLoan, setOpenLoan] = useState<number | null>(null)
+  const [showProfile, setShowProfile] = useState(false)
   const [undo, setUndo] = useState<{ id: number; name: string } | null>(null)
-
-  // The "Undo" bar disappears after 5 seconds.
-  useEffect(() => {
-    if (!undo) return
-    const t = setTimeout(() => setUndo(null), 5000)
-    return () => clearTimeout(t)
-  }, [undo])
   const { isConnected } = useNetInfo()
   const offline = isConnected === false
 
@@ -73,6 +49,14 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
   }, [token, onLogout])
 
   useEffect(() => { load() }, [load])
+  useEffect(() => { api<Profile>('/me', {}, token).then(setProfile).catch(() => {}) }, [token])
+
+  // The "Undo" bar disappears after 5 seconds.
+  useEffect(() => {
+    if (!undo) return
+    const t = setTimeout(() => setUndo(null), 5000)
+    return () => clearTimeout(t)
+  }, [undo])
 
   const refresh = async () => {
     setRefreshing(true)
@@ -81,13 +65,13 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
   }
 
   // Optimistic: show "repaid" instantly, roll back if the server says no.
-  async function markRepaid(id: number) {
+  async function markRepaid(loan: Loan) {
     const before = loans
-    setLoans((ls) => ls?.map((l) => (l.id === id ? { ...l, status: 'repaid', repaidAt: new Date().toISOString() } : l)) ?? null)
+    setLoans((ls) => ls?.map((l) => (l.id === loan.id ? { ...l, status: 'repaid', paidPaise: l.amountPaise } : l)) ?? null)
     if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
     try {
-      await api(`/loans/${id}/repay`, { method: 'PATCH' }, token)
-      setUndo({ id, name: before?.find((l) => l.id === id)?.friendName ?? '' })
+      await api(`/loans/${loan.id}/repay`, { method: 'PATCH' }, token)
+      setUndo({ id: loan.id, name: loan.friendName })
       await load()
     } catch (e) {
       setLoans(before)
@@ -100,141 +84,203 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
     const { id } = undo
     setUndo(null)
     try {
-      await api(`/loans/${id}/unrepay`, { method: 'PATCH' }, token)
+      await api(`/loans/${id}/payments/last`, { method: 'DELETE' }, token)
       await load()
     } catch (e) {
       setError((e as Error).message)
     }
   }
 
-  async function deleteLoan(loan: Loan) {
-    const ok = await confirmAsync('Delete this loan?', `${loan.friendName}, ${formatINR(loan.amountPaise)}. This can't be undone.`, 'Delete')
-    if (!ok) return
-    try {
-      await api(`/loans/${loan.id}`, { method: 'DELETE' }, token)
-      await load()
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }
-
-  if (!loans && !error) {
-    return <View style={styles.center}><ActivityIndicator size="large" color={colors.brand} /></View>
-  }
+  const remind = (loan: Loan) =>
+    Linking.openURL(`https://wa.me/?text=${encodeURIComponent(reminderText(loan, today, profile?.upiId ?? null))}`)
 
   const counts = {
     all: loans?.length ?? 0,
     overdue: loans?.filter((l) => l.status === 'overdue').length ?? 0,
     repaid: loans?.filter((l) => l.status === 'repaid').length ?? 0,
   }
-  const shown = (loans ?? []).filter((l) => filter === 'all' || l.status === filter)
-  // Most recently added friends first, no duplicates: one tap to reuse a name.
+  const q = search.trim().toLowerCase()
+  const shownLoans = (loans ?? []).filter((l) => (filter === 'all' || l.status === filter) && (!q || l.friendName.toLowerCase().includes(q)))
+  const friends = useMemo(() => groupByFriend(loans ?? []).filter((f) => !q || f.name.toLowerCase().includes(q)), [loans, q])
+  // Most recently added friends first, no duplicates: one tap to reuse a name in the add form.
   const recentFriends = [...new Set([...(loans ?? [])].sort((a, b) => b.id - a.id).map((l) => l.friendName))]
+
+  if (!loans && !error) {
+    return <View style={styles.center}><ActivityIndicator size="large" color={colors.brand} /></View>
+  }
+
+  const header = (
+    <>
+      <View style={styles.topBar}>
+        <View>
+          <Text style={styles.brand}>MiniLedger</Text>
+          {today ? (
+            <Text style={styles.today}>{new Date(`${today}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}</Text>
+          ) : null}
+        </View>
+        <Pressable onPress={() => setShowProfile(true)} accessibilityRole="button" accessibilityLabel="Profile and settings" hitSlop={8}>
+          <Avatar name="Me" size={38} />
+        </Pressable>
+      </View>
+
+      {summary && <SummaryCard s={summary} />}
+
+      {error && (
+        <Pressable style={styles.errorBox} onPress={refresh} accessibilityRole="button">
+          <Text style={styles.errorText}>{error} Tap to retry.</Text>
+        </Pressable>
+      )}
+
+      <View style={styles.segment}>
+        {(['loans', 'friends'] as const).map((t) => (
+          <Pressable
+            key={t}
+            onPress={() => setTab(t)}
+            style={[styles.segmentItem, tab === t && styles.segmentActive]}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: tab === t }}
+          >
+            <Text style={[styles.segmentText, tab === t && styles.segmentTextActive]}>{t === 'loans' ? 'Loans' : 'Friends'}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {(loans?.length ?? 0) > 0 && (
+        <View style={styles.search}>
+          <Text style={styles.searchIcon}>⌕</Text>
+          <TextInput
+            style={styles.searchInput}
+            value={search}
+            onChangeText={setSearch}
+            placeholder={tab === 'loans' ? 'Search loans by name' : 'Search friends'}
+            autoCorrect={false}
+            accessibilityLabel="Search"
+          />
+          {search ? (
+            <Pressable onPress={() => setSearch('')} hitSlop={10} accessibilityRole="button" accessibilityLabel="Clear search">
+              <Text style={styles.clear}>✕</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      )}
+
+      {tab === 'loans' && (
+        <View style={styles.tabs}>
+          {(['all', 'overdue', 'repaid'] as const).map((f) => (
+            <Pressable
+              key={f}
+              style={({ pressed }) => [styles.tab, filter === f && styles.tabActive, pressed && { opacity: 0.7 }]}
+              onPress={() => setFilter(f)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: filter === f }}
+            >
+              <Text style={[styles.tabText, filter === f && styles.tabTextActive]}>
+                {f[0].toUpperCase() + f.slice(1)} ({counts[f]})
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+    </>
+  )
+
+  const empty = (
+    <View style={styles.empty}>
+      <Text style={styles.emptyEmoji}>{q ? '🔍' : '🤝'}</Text>
+      <Text style={styles.emptyTitle}>
+        {q ? `Nothing matches "${search.trim()}"` : (loans?.length ?? 0) === 0 ? 'No loans yet' : `No ${filter} loans`}
+      </Text>
+      <Text style={styles.muted}>
+        {q ? 'Try another name.' : (loans?.length ?? 0) === 0 ? 'Tap "+ Add loan" to record money you lent a friend.' : 'Nothing here right now.'}
+      </Text>
+    </View>
+  )
 
   return (
     <View style={styles.screen}>
       {offline && <Text style={styles.offline}>You're offline. Showing the last saved list.</Text>}
 
-      <FlatList
-        data={shown}
-        keyExtractor={(l) => String(l.id)}
-        contentContainerStyle={{ padding: 16, paddingBottom: 150 }}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
-        ListHeaderComponent={
-          <>
-            <View style={styles.topBar}>
-              <View>
-                <Text style={styles.brand}>MiniLedger</Text>
-                {today ? <Text style={styles.today}>{new Date(`${today}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}</Text> : null}
-              </View>
-              <Pressable onPress={onLogout} hitSlop={12}><Text style={styles.link}>Log out</Text></Pressable>
-            </View>
-            {summary && <SummaryCard s={summary} />}
-            {error && (
-              <Pressable style={styles.errorBox} onPress={refresh}>
-                <Text style={styles.errorText}>{error} Tap to retry.</Text>
-              </Pressable>
-            )}
-            <View style={styles.tabs}>
-              {(['all', 'overdue', 'repaid'] as const).map((f) => (
-                <Pressable key={f} style={({ pressed }) => [styles.tab, filter === f && styles.tabActive, pressed && styles.pressed]} onPress={() => setFilter(f)}>
-                  <Text style={[styles.tabText, filter === f && styles.tabTextActive]}>
-                    {f[0].toUpperCase() + f.slice(1)} ({counts[f]})
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          </>
-        }
-        ListEmptyComponent={
-          <View style={styles.empty}>
-            <Text style={styles.emptyTitle}>{filter === 'all' ? 'No loans yet' : `No ${filter} loans`}</Text>
-            <Text style={styles.muted}>
-              {filter === 'all' ? 'Tap "+ Add loan" to record money you lent a friend.' : 'Nothing here right now.'}
-            </Text>
-          </View>
-        }
-        renderItem={({ item }) => (
-          <LoanRow
-            loan={item}
-            today={today}
-            disabled={offline}
-            onRepay={() => markRepaid(item.id)}
-            onRemind={() => remindOnWhatsApp(item, today)}
-            onReceipt={() => setReceiptFor(item.id)}
-            onDelete={() => deleteLoan(item)}
-          />
-        )}
-        ListFooterComponent={(loans?.length ?? 0) > 0 ? <Text style={styles.footerHint}>Tip: press and hold a loan to delete it.</Text> : null}
-      />
+      {tab === 'loans' ? (
+        <FlatList
+          data={shownLoans}
+          keyExtractor={(l) => String(l.id)}
+          contentContainerStyle={styles.list}
+          keyboardShouldPersistTaps="handled"
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
+          ListHeaderComponent={header}
+          ListEmptyComponent={empty}
+          renderItem={({ item }) => (
+            <LoanRow
+              loan={item}
+              today={today}
+              offline={offline}
+              onOpen={() => setOpenLoan(item.id)}
+              onRepay={() => markRepaid(item)}
+              onRemind={() => remind(item)}
+            />
+          )}
+        />
+      ) : (
+        <FlatList
+          data={friends}
+          keyExtractor={(f) => f.name.toLowerCase()}
+          contentContainerStyle={styles.list}
+          keyboardShouldPersistTaps="handled"
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
+          ListHeaderComponent={header}
+          ListEmptyComponent={empty}
+          // Tapping a friend shows just their loans.
+          renderItem={({ item }) => <FriendRow friend={item} onPress={() => { setSearch(item.name); setFilter('all'); setTab('loans') }} />}
+        />
+      )}
 
-      {undo && (
+      {undo ? (
         <View style={styles.toast} accessibilityLiveRegion="polite">
           <Text style={styles.toastText} numberOfLines={1}>Marked {undo.name}'s loan as repaid</Text>
           <Pressable onPress={undoRepaid} hitSlop={10} accessibilityRole="button" accessibilityLabel="Undo">
             <Text style={styles.toastUndo}>UNDO</Text>
           </Pressable>
         </View>
-      )}
-
-      {!undo && (
-        <Pressable style={({ pressed }) => [styles.fab, offline && { opacity: 0.4 }, pressed && styles.pressed]} disabled={offline} onPress={() => setAdding(true)} accessibilityRole="button" accessibilityLabel="Add loan">
+      ) : (
+        <Pressable
+          style={({ pressed }) => [styles.fab, offline && { opacity: 0.4 }, pressed && { opacity: 0.8 }]}
+          disabled={offline}
+          onPress={() => setAdding(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Add loan"
+        >
           <Text style={styles.fabText}>+ Add loan</Text>
         </Pressable>
       )}
 
       <AddLoanSheet visible={adding} token={token} recentFriends={recentFriends} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
-
-      <Modal visible={receiptFor !== null} transparent animationType="fade" onRequestClose={() => setReceiptFor(null)}>
-        <Pressable style={styles.viewer} onPress={() => setReceiptFor(null)}>
-          {receiptFor !== null && (
-            <Image
-              source={{ uri: `${API_URL}/loans/${receiptFor}/receipt`, headers: { Authorization: `Bearer ${token}` } }}
-              style={styles.receipt}
-              resizeMode="contain"
-            />
-          )}
-          <Text style={styles.viewerHint}>Tap anywhere to close</Text>
-        </Pressable>
-      </Modal>
+      <LoanDetailSheet
+        loanId={openLoan}
+        token={token}
+        today={today}
+        offline={offline}
+        onClose={() => setOpenLoan(null)}
+        onChanged={load}
+        onRemind={remind}
+      />
+      <ProfileSheet visible={showProfile} token={token} onClose={() => setShowProfile(false)} onLogout={onLogout} onProfile={setProfile} />
     </View>
   )
 }
 
+/** The headline card, Khatabook-style: "You'll get back" first, then the breakdown. */
 function SummaryCard({ s }: { s: Summary }) {
   const outstanding = s.totalLentPaise - s.totalRepaidPaise
-  const repaidShare = s.totalLentPaise ? s.totalRepaidPaise / s.totalLentPaise : 0
+  const share = s.totalLentPaise ? s.totalRepaidPaise / s.totalLentPaise : 0
   return (
-    <View style={styles.card}>
-      <Text style={styles.cardLabel}>Still to get back</Text>
-      <Text style={styles.cardBig}>{formatINR(outstanding)}</Text>
-      <View style={styles.bar}>
-        <View style={[styles.barFill, { width: `${Math.round(repaidShare * 100)}%` }]} />
-      </View>
-      <Text style={styles.barLabel}>{Math.round(repaidShare * 100)}% repaid</Text>
+    <View style={styles.card} accessible accessibilityLabel={`You'll get back ${formatINR(outstanding)}. ${Math.round(share * 100)} percent repaid.`}>
+      <Text style={styles.cardLabel}>You'll get back</Text>
+      <Text style={[styles.cardBig, money]}>{formatINR(outstanding)}</Text>
+      <ProgressBar share={share} color="#34D399" track="#374151" />
+      <Text style={styles.barLabel}>{Math.round(share * 100)}% of everything you lent has come back</Text>
       <View style={styles.cardRow}>
         <Stat label="Total lent" value={formatINR(s.totalLentPaise)} />
-        <Stat label="Repaid" value={formatINR(s.totalRepaidPaise)} />
+        <Stat label="Received" value={formatINR(s.totalRepaidPaise)} />
         <Stat label={`Overdue${s.overdueCount ? ` (${s.overdueCount})` : ''}`} value={formatINR(s.overduePaise)} danger={s.overduePaise > 0} />
       </View>
     </View>
@@ -244,142 +290,48 @@ function SummaryCard({ s }: { s: Summary }) {
 const Stat = ({ label, value, danger }: { label: string; value: string; danger?: boolean }) => (
   <View style={{ flex: 1 }}>
     <Text style={styles.statLabel}>{label}</Text>
-    <Text style={[styles.statValue, danger && { color: '#FCA5A5' }]}>{value}</Text>
+    <Text style={[styles.statValue, money, danger && { color: '#FCA5A5' }]}>{value}</Text>
   </View>
 )
-
-function LoanRow({ loan, today, disabled, onRepay, onRemind, onReceipt, onDelete }: {
-  loan: Loan
-  today: string
-  disabled: boolean
-  onRepay: () => void
-  onRemind: () => void
-  onReceipt: () => void
-  onDelete: () => void
-}) {
-  const overdue = loan.status === 'overdue'
-  const repaid = loan.status === 'repaid'
-  const daysLeft = daysBetween(today, loan.dueDate)
-  const dueSoon = !repaid && !overdue && daysLeft <= DUE_SOON_DAYS
-  const late = overdue ? -daysLeft : 0
-  const plural = (n: number) => `${n} day${n === 1 ? '' : 's'}`
-  // Short status for the pill; the full date sits next to it in grey.
-  const pill = repaid
-    ? { text: 'Repaid', fg: colors.ok, bg: '#ECFDF5' }
-    : overdue
-      ? { text: `${plural(late)} late`, fg: colors.danger, bg: '#FEE2E2' }
-      : daysLeft === 0
-        ? { text: 'Due today', fg: colors.warn, bg: '#FEF3C7' }
-        : dueSoon
-          ? { text: `Due in ${plural(daysLeft)}`, fg: colors.warn, bg: '#FEF3C7' }
-          : { text: 'Upcoming', fg: colors.muted, bg: '#F3F4F6' }
-  const dateLabel = repaid ? `was due ${prettyDate(loan.dueDate)}` : prettyDate(loan.dueDate)
-
-  return (
-    <Pressable
-      onLongPress={disabled ? undefined : onDelete}
-      delayLongPress={500}
-      accessibilityLabel={`${loan.friendName}, ${formatINR(loan.amountPaise)}, ${pill.text}, due ${prettyDate(loan.dueDate)}`}
-      accessibilityHint="Press and hold to delete"
-      style={({ pressed }) => [styles.row, overdue && styles.rowOverdue, dueSoon && styles.rowSoon, repaid && styles.rowRepaid, pressed && styles.pressed]}
-    >
-      <View style={styles.rowTop}>
-        <View style={[styles.avatar, { backgroundColor: avatarColor(loan.friendName) }]}>
-          <Text style={styles.avatarText}>{initials(loan.friendName)}</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={[styles.name, repaid && styles.strike]} numberOfLines={1}>{loan.friendName}</Text>
-          <View style={styles.metaRow}>
-            <Text style={[styles.pill, { color: pill.fg, backgroundColor: pill.bg }]}>{pill.text}</Text>
-            <Text style={styles.date} numberOfLines={1}>{dateLabel}</Text>
-          </View>
-        </View>
-        <Text style={[styles.amount, overdue && { color: colors.danger }]}>{formatINR(loan.amountPaise)}</Text>
-      </View>
-
-      {(!repaid || loan.hasReceipt) && (
-        <View style={styles.actions}>
-          {!repaid && (
-            <Pressable
-              style={({ pressed }) => [styles.repay, disabled && { opacity: 0.4 }, pressed && styles.pressed]}
-              disabled={disabled}
-              onPress={onRepay}
-              accessibilityRole="button"
-              accessibilityLabel={`Mark ${loan.friendName}'s loan as repaid`}
-            >
-              <Text style={styles.repayText}>✓ Repaid</Text>
-            </Pressable>
-          )}
-          {!repaid && (
-            <Pressable style={({ pressed }) => [styles.action, pressed && styles.pressed]} onPress={onRemind} accessibilityRole="button" accessibilityLabel={`Remind ${loan.friendName} on WhatsApp`}>
-              <Text style={styles.remindText}>Remind</Text>
-            </Pressable>
-          )}
-          {loan.hasReceipt && (
-            <Pressable style={({ pressed }) => [styles.action, pressed && styles.pressed]} onPress={onReceipt} accessibilityRole="button" accessibilityLabel="View receipt">
-              <Text style={styles.receiptText}>Receipt</Text>
-            </Pressable>
-          )}
-        </View>
-      )}
-    </Pressable>
-  )
-}
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg },
+  list: { padding: 16, paddingBottom: 150 },
   offline: { backgroundColor: '#FEF3C7', color: '#92400E', padding: 10, textAlign: 'center' },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, marginTop: 8 },
   brand: { fontSize: 24, fontWeight: '800', color: colors.ink },
   today: { fontSize: 13, color: colors.muted, marginTop: 2 },
-  link: { color: colors.brand, fontWeight: '600', fontSize: 13 },
-  card: { backgroundColor: colors.ink, borderRadius: 20, padding: 20 },
+  card: { backgroundColor: colors.ink, borderRadius: 22, padding: 20 },
   cardLabel: { color: '#9CA3AF', fontSize: 13 },
-  cardBig: { color: '#fff', fontSize: 34, fontWeight: '800', marginVertical: 6 },
-  bar: { height: 6, backgroundColor: '#374151', borderRadius: 3, overflow: 'hidden', marginTop: 4 },
-  barFill: { height: 6, backgroundColor: '#34D399', borderRadius: 3 },
+  cardBig: { color: '#fff', fontSize: 36, fontWeight: '800', marginTop: 4, marginBottom: 12 },
   barLabel: { color: '#9CA3AF', fontSize: 12, marginTop: 6 },
-  cardRow: { flexDirection: 'row', marginTop: 14, gap: 8 },
+  cardRow: { flexDirection: 'row', marginTop: 16, gap: 8 },
   statLabel: { color: '#9CA3AF', fontSize: 12 },
   statValue: { color: '#fff', fontSize: 15, fontWeight: '700', marginTop: 2 },
   errorBox: { backgroundColor: colors.dangerBg, borderRadius: 12, padding: 12, marginTop: 12 },
   errorText: { color: colors.danger },
-  tabs: { flexDirection: 'row', gap: 8, marginTop: 20, marginBottom: 12 },
-  tab: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20, backgroundColor: '#fff', borderWidth: 1, borderColor: colors.line },
+  segment: { flexDirection: 'row', backgroundColor: '#E5E7EB', borderRadius: 12, padding: 4, marginTop: 20 },
+  segmentItem: { flex: 1, paddingVertical: 9, borderRadius: 9, alignItems: 'center' },
+  segmentActive: { backgroundColor: colors.card },
+  segmentText: { fontWeight: '700', color: colors.muted },
+  segmentTextActive: { color: colors.ink },
+  search: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderRadius: 12, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 12, marginTop: 12 },
+  searchIcon: { fontSize: 18, color: colors.muted, marginRight: 6 },
+  searchInput: { flex: 1, paddingVertical: 11, fontSize: 15 },
+  clear: { color: colors.muted, fontSize: 14, padding: 4 },
+  tabs: { flexDirection: 'row', gap: 8, marginTop: 12, marginBottom: 12 },
+  tab: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
   tabActive: { backgroundColor: colors.ink, borderColor: colors.ink },
   tabText: { color: colors.ink, fontWeight: '600', fontSize: 13 },
   tabTextActive: { color: '#fff' },
   empty: { alignItems: 'center', padding: 32 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', color: colors.ink, marginBottom: 4 },
+  emptyEmoji: { fontSize: 40, marginBottom: 8 },
+  emptyTitle: { fontSize: 18, fontWeight: '700', color: colors.ink, marginBottom: 4, textAlign: 'center' },
   muted: { color: colors.muted, textAlign: 'center' },
-  row: { backgroundColor: '#fff', borderRadius: 16, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
-  rowTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
-  pill: { fontSize: 12, fontWeight: '700', paddingVertical: 2, paddingHorizontal: 8, borderRadius: 10, overflow: 'hidden' },
-  date: { fontSize: 12, color: colors.muted, flexShrink: 1 },
-  pressed: { opacity: 0.6 },
-  rowOverdue: { backgroundColor: colors.dangerBg, borderColor: '#FECACA', borderLeftWidth: 4, borderLeftColor: colors.danger },
-  rowSoon: { borderLeftWidth: 4, borderLeftColor: colors.warn },
-  rowRepaid: { opacity: 0.6 },
-  avatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { color: '#fff', fontWeight: '800' },
-  name: { fontSize: 16, fontWeight: '700', color: colors.ink },
-  strike: { textDecorationLine: 'line-through' },
-  actions: { flexDirection: 'row', gap: 8, marginTop: 12, marginLeft: 52 },
-  action: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line },
-  remindText: { color: '#128C7E', fontWeight: '700', fontSize: 13 },
-  receiptText: { color: colors.brand, fontWeight: '700', fontSize: 13 },
-  amount: { fontSize: 17, fontWeight: '800', color: colors.ink },
-  repay: { borderRadius: 8, paddingVertical: 6, paddingHorizontal: 12, borderWidth: 1, borderColor: '#A7F3D0', backgroundColor: '#ECFDF5' },
-  repayText: { color: colors.ok, fontWeight: '700', fontSize: 13 },
-  fab: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: colors.brand, borderRadius: 28, paddingVertical: 16, paddingHorizontal: 28, elevation: 4 },
+  fab: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: colors.brand, borderRadius: 28, paddingVertical: 16, paddingHorizontal: 28, elevation: 4, shadowColor: colors.brand, shadowOpacity: 0.3, shadowRadius: 10, shadowOffset: { width: 0, height: 4 } },
   fabText: { color: '#fff', fontWeight: '800', fontSize: 16 },
-  footerHint: { color: colors.muted, textAlign: 'center', fontSize: 12, marginTop: 8 },
   toast: { position: 'absolute', bottom: 32, left: 16, right: 16, backgroundColor: colors.ink, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', elevation: 6 },
   toastText: { color: '#fff', flex: 1, marginRight: 12 },
   toastUndo: { color: '#A5B4FC', fontWeight: '800' },
-  viewer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' },
-  receipt: { width: '90%', height: '75%' },
-  viewerHint: { color: '#fff', marginTop: 12 },
 })

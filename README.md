@@ -56,7 +56,7 @@ Scan the QR code with Expo Go on your phone (same Wi-Fi as the laptop). Use your
 
 ```bash
 cd server
-npm test        # 13 tests, about 25 seconds
+npm test        # 16 tests, about 25 seconds
 npm run typecheck
 ```
 
@@ -69,13 +69,20 @@ CI runs the same tests on every push, once on PGlite and once on a real Postgres
   - your recent friends appear as one-tap buttons
   - the amount shows back as you type it ("₹1,500.50")
   - due date presets: 1 week, 2 weeks, 1 month
-- See every loan, with overdue ones in red ("Overdue by 4 days")
-- Mark a loan as repaid (with a small vibration on the phone), and **undo** it for 5 seconds in case you tapped by mistake
-- Press and hold a loan to **delete** it (with a confirmation), for anything entered wrongly
-- A summary card at the top: still to get back, total lent, repaid, overdue, and how much has come back so far
-- Filter the list: all, overdue, repaid
-- Loans due in the next 3 days are marked "Due in 2 days" in amber, before they turn red
-- "Remind on WhatsApp" opens WhatsApp with a polite reminder ready to send. You pick the chat, so the app never needs your friend's number
+- See every loan with a short status pill: "12 days late" in red, "Due in 2 days" in amber, "Upcoming", "Repaid"
+- **Money often comes back in parts.** Record "got ₹500 back" on a loan and it shows what's left, with a progress bar. Paying more than what's pending is refused
+- Tap a loan for its **details**:
+  - what's pending;
+  - when it was lent and when it's due;
+  - the receipt (view it, or add one later);
+  - the full **payment history**, with undo for the last payment;
+  - delete, with a confirmation
+- Mark a loan as fully repaid in one tap (with a small vibration), and **undo** it for 5 seconds
+- **Friends** tab: one line per person with what they owe you in total, how many loans, and how many are late. Biggest first. Tap a friend to see just their loans
+- **Search** by name, and filter: all, overdue, repaid
+- A "You'll get back" card at the top: still to get back, total lent, received, overdue, and how much has come back so far
+- **Remind on WhatsApp** opens WhatsApp with a polite message ready to send, including what's still pending. Save your **UPI ID** in your profile and the reminder tells your friend where to pay. You pick the chat, so the app never needs your friend's number
+- **Face ID lock**, like a banking app: turn it on in your profile. It asks when you open the app, and again if you were away for more than a minute
 
 Every button has an accessibility label, so the app works with VoiceOver and TalkBack.
 
@@ -99,7 +106,11 @@ Swapping in a real SMS provider means changing one `console.log` line.
 
 **You can only touch your own loans.** Every query is scoped by the user id from the login token. Asking for someone else's loan returns 404, not 403, so the API doesn't even confirm it exists. Tests check this for listing, repaying and the summary.
 
-**Repaying twice is safe.** `repaid_at = COALESCE(repaid_at, now())` keeps the first repayment time, so a double tap or a retried request can't change history.
+**Payments are a ledger.** Each repayment is its own row in a `payments` table, and each loan keeps a running `paid_paise` total. Nothing is overwritten, so the history is always there, and undo just removes the last row.
+
+**You can't pay more than is owed, even with two taps at the same moment.** Recording a payment is a single SQL statement. It adds to the running total and writes the history row together, and its `WHERE paid_paise + amount <= amount_paise` refuses anything above what's pending. Postgres locks the row while it updates, so a second payment that arrives at the same instant re-checks against the new total and is refused. There's a test that fires two payments at once, and CI runs it on real Postgres.
+
+**Repaying twice is safe.** "Mark repaid" pays whatever is left. If nothing is left, it changes nothing and keeps the original repaid time, so a double tap or a retried request can't rewrite history.
 
 **Validation lives at the edge.** Zod checks every request body and returns the first readable message ("Amount must be more than 0, with at most 2 decimals"), which the app shows as is. The database has `CHECK` constraints as a second line of defence.
 
@@ -113,7 +124,7 @@ Swapping in a real SMS provider means changing one `console.log` line.
 
 ## API
 
-All `/loans` routes need `Authorization: Bearer <token>`.
+All `/loans` and `/me` routes need `Authorization: Bearer <token>`.
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
@@ -121,10 +132,13 @@ All `/loans` routes need `Authorization: Bearer <token>`.
 | POST | `/auth/verify` | `{ phone, code }` | `{ token }` (valid 7 days) |
 | GET | `/loans` | | `{ today, loans: [...] }`, each with `status`: `due`, `overdue` or `repaid` |
 | POST | `/loans` | `{ friendName, amount: "1500.50", dueDate: "2026-11-01" }` | `{ loan }` |
-| PATCH | `/loans/:id/repay` | | `{ loan }` |
-| PATCH | `/loans/:id/unrepay` | | `{ loan }` (undo) |
-| DELETE | `/loans/:id` | | 204 (also deletes the receipt file) |
-| GET | `/loans/summary` | | `{ totalLentPaise, totalRepaidPaise, overduePaise, overdueCount }` |
+| GET | `/loans/:id` | | `{ loan, payments }` (history, newest first) |
+| POST | `/loans/:id/payments` | `{ amount: "500" }` | `{ loan }`, or 400 if it's more than what's pending |
+| PATCH | `/loans/:id/repay` | | `{ loan }` (pays whatever is left) |
+| DELETE | `/loans/:id/payments/last` | | `{ loan }` (undo the last payment) |
+| DELETE | `/loans/:id` | | 204 (payments and receipt file go too) |
+| GET | `/loans/summary` | | `{ totalLentPaise, totalRepaidPaise, overduePaise, overdueCount }` (overdue counts only what's still pending) |
+| GET / PATCH | `/me` | `{ upiId: "name@bank" }` | `{ phone, upiId }` |
 | POST | `/loans/:id/receipt` | multipart, field `receipt` | `{ loan }` |
 | GET | `/loans/:id/receipt` | | the image |
 
@@ -144,17 +158,24 @@ server/
   src/seed.ts      sample data for a demo account
   test/            API tests (node:test)
 app/
-  App.tsx              logged in? home : login
-  src/api.ts           fetch wrapper, token storage, money formatting
-  src/LoginScreen.tsx  phone, then code
-  src/HomeScreen.tsx   summary card, list, repay, receipts, offline banner
-  src/AddLoanSheet.tsx the add-loan form and receipt photo
+  App.tsx                 logged in? home : login, plus the Face ID lock
+  src/api.ts              fetch wrapper, secure storage, receipt upload
+  src/format.ts           money, dates, status pills, the reminder message
+  src/ui.tsx              shared Avatar, Pill, ProgressBar, Button
+  src/LoginScreen.tsx     phone, then code
+  src/HomeScreen.tsx      summary card, Loans/Friends tabs, search, undo
+  src/LoanRow.tsx         one loan in the list
+  src/LoanDetailSheet.tsx details, part payments, history, delete
+  src/FriendsList.tsx     loans grouped by friend
+  src/ProfileSheet.tsx    UPI ID, Face ID lock, log out
+  src/AddLoanSheet.tsx    the add-loan form and receipt photo
 ```
 
 ## What I'd do next
 
-- Partial repayments (a `payments` table instead of a single `repaid_at`)
-- Reminders: a daily job that notifies you about loans due tomorrow
+- A notification on the due date (local notifications), and a daily digest
+- Dark mode
+- A UPI payment link in the reminder, once UPI apps can open it from WhatsApp reliably
 - Store receipts in S3 or R2 instead of the local disk
 - Move the rate limiter to Redis so it works across several servers
 - Refresh tokens, so you aren't logged out after 7 days
