@@ -1,5 +1,7 @@
 # MiniLedger
 
+[![CI](https://github.com/Drunal999/miniledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Drunal999/miniledger/actions/workflows/ci.yml)
+
 Track money you've lent to friends: who owes you, how much, and who's late.
 
 - **API:** Node.js, TypeScript, Hono, Zod, PostgreSQL
