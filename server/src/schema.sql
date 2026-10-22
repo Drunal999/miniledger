@@ -22,10 +22,12 @@ CREATE TABLE IF NOT EXISTS loans (
   friend_name   TEXT NOT NULL CHECK (length(friend_name) BETWEEN 1 AND 80),
   amount_paise  BIGINT NOT NULL CHECK (amount_paise > 0),
   paid_paise    BIGINT NOT NULL DEFAULT 0 CHECK (paid_paise >= 0 AND paid_paise <= amount_paise),
+  lent_on       DATE NOT NULL,
   due_date      DATE NOT NULL,
   repaid_at     TIMESTAMPTZ,
   receipt_file  TEXT,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (due_date >= lent_on)
 );
 
 CREATE INDEX IF NOT EXISTS loans_user_idx ON loans (user_id, due_date);

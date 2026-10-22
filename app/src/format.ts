@@ -40,9 +40,8 @@ export function statusPill(l: Loan, today: string) {
 /** The WhatsApp message: friendly, says what's still pending, and how to pay if you've saved a UPI ID. */
 export function reminderText(l: Loan, today: string, upiId: string | null) {
   const pending = pendingOf(l)
-  const what = l.paidPaise > 0
-    ? `the ${formatINR(l.amountPaise)} I lent you (${formatINR(pending)} still pending)`
-    : `the ${formatINR(l.amountPaise)} I lent you`
+  const lent = `the ${formatINR(l.amountPaise)} I lent you on ${prettyDate(l.lentOn)}`
+  const what = l.paidPaise > 0 ? `${lent} (${formatINR(pending)} still pending)` : lent
   const when = l.dueDate < today ? `which was due on ${prettyDate(l.dueDate)}` : `which is due on ${prettyDate(l.dueDate)}`
   const pay = upiId ? ` You can pay me on UPI: ${upiId}` : ''
   return `Hi ${l.friendName}, a gentle reminder about ${what}, ${when}.${pay} Thanks!`

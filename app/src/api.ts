@@ -10,6 +10,7 @@ export type Loan = {
   friendName: string
   amountPaise: number
   paidPaise: number
+  lentOn: string
   dueDate: string
   repaidAt: string | null
   hasReceipt: boolean

@@ -32,10 +32,11 @@ const loans: [string, number, number, number[]][] = [
 ]
 for (const [name, paise, days, payments] of loans) {
   const paid = payments.reduce((a, b) => a + b, 0)
+  const lentOn = shift(Math.min(0, days - 14)) // lent two weeks before the due date, never in the future
   const [loan] = await db.query<{ id: number }>(
-    `INSERT INTO loans (user_id, friend_name, amount_paise, paid_paise, due_date, repaid_at)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-    [user.id, name, paise, paid, shift(days), paid === paise ? new Date() : null],
+    `INSERT INTO loans (user_id, friend_name, amount_paise, paid_paise, lent_on, due_date, repaid_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [user.id, name, paise, paid, lentOn, shift(days), paid === paise ? new Date() : null],
   )
   for (const p of payments) await db.query('INSERT INTO payments (loan_id, amount_paise) VALUES ($1, $2)', [loan.id, p])
 }

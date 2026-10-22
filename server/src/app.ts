@@ -43,6 +43,7 @@ const loanSchema = z.object({
   friendName: z.string().trim().min(1, 'Friend name is required').max(80),
   amount: amountSchema,
   dueDate: z.iso.date('Due date must be YYYY-MM-DD'),
+  lentOn: z.iso.date('Lent date must be YYYY-MM-DD').optional(), // the day the money was given; can be in the past
 })
 
 // UPI IDs look like name@bank (e.g. runal@okaxis). Empty string clears it.
@@ -148,7 +149,7 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
   app.use('/me', requireUser)
 
   const loanFields = `id, friend_name AS "friendName", amount_paise AS "amountPaise", paid_paise AS "paidPaise",
-    due_date AS "dueDate", repaid_at AS "repaidAt", receipt_file IS NOT NULL AS "hasReceipt", created_at AS "createdAt"`
+    lent_on AS "lentOn", due_date AS "dueDate", repaid_at AS "repaidAt", receipt_file IS NOT NULL AS "hasReceipt", created_at AS "createdAt"`
 
   type LoanRow = { repaidAt: string | null; dueDate: string }
   // Fully repaid -> "repaid"; otherwise past the due date (in IST) -> "overdue"; else "due".
@@ -225,10 +226,15 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
 
   app.post('/loans', async (c) => {
     const body = loanSchema.parse(await c.req.json())
+    const today = todayIn(now())
+    // Old loans can be entered later. Without a lent date, use today, or the due date if that has already passed.
+    const lentOn = body.lentOn ?? (body.dueDate < today ? body.dueDate : today)
+    if (lentOn > today) return c.json({ error: "The lent date can't be in the future" }, 400)
+    if (body.dueDate < lentOn) return c.json({ error: "The due date can't be before the day you lent the money" }, 400)
     const [loan] = await db.query<LoanRow>(
-      `INSERT INTO loans (user_id, friend_name, amount_paise, due_date) VALUES ($1, $2, $3, $4)
+      `INSERT INTO loans (user_id, friend_name, amount_paise, lent_on, due_date) VALUES ($1, $2, $3, $4, $5)
        RETURNING ${loanFields}`,
-      [c.get('userId'), body.friendName, body.amount, body.dueDate],
+      [c.get('userId'), body.friendName, body.amount, lentOn, body.dueDate],
     )
     return c.json({ loan: withStatus(loan) }, 201)
   })

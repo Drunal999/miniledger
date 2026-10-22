@@ -195,6 +195,19 @@ test('profile: save a UPI ID, reject a bad one, clear it', async () => {
   assert.equal((await call('GET', '/me')).status, 401) // needs a token
 })
 
+test('lent date: sensible default, and it has to make sense with the due date', async () => {
+  const t = await login()
+  const post = (extra: Record<string, string>) =>
+    call('POST', '/loans', { friendName: 'Asha', amount: '10', ...extra }, t)
+  const lentOf = async (r: Response) => ((await r.json()) as { loan: { lentOn: string } }).loan.lentOn
+
+  assert.equal(await lentOf(await post({ dueDate: '2026-11-01' })), '2026-10-22') // today (IST)
+  assert.equal(await lentOf(await post({ dueDate: '2026-10-05' })), '2026-10-05') // an old loan entered late
+  assert.equal(await lentOf(await post({ dueDate: '2026-10-05', lentOn: '2026-09-20' })), '2026-09-20')
+  assert.equal((await post({ dueDate: '2026-10-05', lentOn: '2026-10-10' })).status, 400) // due before lent
+  assert.equal((await post({ dueDate: '2026-11-05', lentOn: '2026-10-23' })).status, 400) // lent tomorrow
+})
+
 test('overdue flips at midnight India time, not UTC', async () => {
   const t = await login()
   await call('POST', '/loans', { friendName: 'Asha', amount: '100', dueDate: '2026-10-22' }, t)

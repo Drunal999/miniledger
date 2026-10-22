@@ -36,15 +36,18 @@ export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }
 }) {
   const [name, setName] = useState('')
   const [amount, setAmount] = useState('')
+  const [lent, setLent] = useState(new Date())
+  const [lentText, setLentText] = useState(toISODate(new Date()))
   const [due, setDue] = useState(inDays(7))
   const [dueText, setDueText] = useState(toISODate(inDays(7)))
-  const [showPicker, setShowPicker] = useState(false)
+  const [picker, setPicker] = useState<'lent' | 'due' | null>(null)
   const [photo, setPhoto] = useState<Photo | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const reset = () => {
-    setName(''); setAmount(''); setDue(inDays(7)); setDueText(toISODate(inDays(7))); setPhoto(null); setError(null)
+    setName(''); setAmount(''); setLent(new Date()); setLentText(toISODate(new Date()))
+    setDue(inDays(7)); setDueText(toISODate(inDays(7))); setPhoto(null); setError(null); setPicker(null)
   }
 
   async function pick(fromCamera: boolean) {
@@ -62,9 +65,10 @@ export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }
     setError(null)
     try {
       const dueDate = Platform.OS === 'web' ? dueText : toISODate(due)
+      const lentOn = Platform.OS === 'web' ? lentText : toISODate(lent)
       const { loan } = await api<{ loan: Loan }>(
         '/loans',
-        { method: 'POST', body: JSON.stringify({ friendName: name, amount: amount.trim(), dueDate }) },
+        { method: 'POST', body: JSON.stringify({ friendName: name, amount: amount.trim(), lentOn, dueDate }) },
         token,
       )
       if (photo) await uploadReceipt(loan.id, photo, token)
@@ -104,6 +108,30 @@ export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }
         </View>
         {previewAmount(amount) && <Text style={styles.preview}>{previewAmount(amount)}</Text>}
 
+        <Text style={styles.label}>Lent on</Text>
+        {Platform.OS === 'web' ? (
+          <TextInput style={styles.input} value={lentText} onChangeText={setLentText} placeholder="YYYY-MM-DD" accessibilityLabel="Lent on" />
+        ) : (
+          <>
+            <Pressable style={styles.input} onPress={() => setPicker(picker === 'lent' ? null : 'lent')} accessibilityRole="button" accessibilityLabel="Lent on">
+              <Text style={styles.inputText}>{friendlyDue(lent)}</Text>
+            </Pressable>
+            {picker === 'lent' && (
+              <DateTimePicker
+                value={lent}
+                mode="date"
+                maximumDate={new Date()} // you can't lend money in the future
+                onChange={(_, d) => {
+                  if (Platform.OS !== 'ios') setPicker(null)
+                  if (!d) return
+                  setLent(d)
+                  if (toISODate(due) < toISODate(d)) setDue(d) // keep the due date on or after the lent date
+                }}
+              />
+            )}
+          </>
+        )}
+
         <Text style={styles.label}>Due date</Text>
         <View style={styles.chips}>
           {DUE_PRESETS.map(([label, days]) => (
@@ -122,14 +150,15 @@ export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }
           <TextInput style={styles.input} value={dueText} onChangeText={setDueText} placeholder="YYYY-MM-DD" />
         ) : (
           <>
-            <Pressable style={styles.input} onPress={() => setShowPicker(true)}>
+            <Pressable style={styles.input} onPress={() => setPicker(picker === 'due' ? null : 'due')} accessibilityRole="button" accessibilityLabel="Due date">
               <Text style={styles.inputText}>{friendlyDue(due)}</Text>
             </Pressable>
-            {showPicker && (
+            {picker === 'due' && (
               <DateTimePicker
                 value={due}
                 mode="date"
-                onChange={(_, d) => { setShowPicker(Platform.OS === 'ios'); if (d) setDue(d) }}
+                minimumDate={lent} // can't be due before it was lent
+                onChange={(_, d) => { if (Platform.OS !== 'ios') setPicker(null); if (d) setDue(d) }}
               />
             )}
           </>

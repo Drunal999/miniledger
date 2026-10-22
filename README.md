@@ -55,7 +55,7 @@ Scan the QR code with Expo Go on your phone (same Wi-Fi as the laptop). Use your
 
 ```bash
 cd server
-npm test        # 16 tests, about 25 seconds
+npm test        # 17 tests, about 25 seconds
 npm run typecheck
 ```
 
@@ -64,7 +64,7 @@ CI runs the same tests on every push, once on PGlite and once on a real Postgres
 ## What it does
 
 - Log in with your phone number and a one-time code. The code submits itself when the 6th digit is typed, and "Resend" counts down from 30 seconds to match the server's rule
-- Add a loan: friend's name, amount, due date, and optionally a photo of the receipt
+- Add a loan: friend's name, amount, the day you lent it (defaults to today, can be backdated), due date, and optionally a photo of the receipt. The date pickers won't let you lend in the future or set a due date before the lent date, and the server checks the same rules
   - your recent friends appear as one-tap buttons
   - the amount shows back as you type it ("₹1,500.50")
   - due date presets: 1 week, 2 weeks, 1 month
@@ -72,7 +72,7 @@ CI runs the same tests on every push, once on PGlite and once on a real Postgres
 - **Money often comes back in parts.** Record "got ₹500 back" on a loan and it shows what's left, with a progress bar. Paying more than what's pending is refused
 - Tap a loan for its **details**:
   - what's pending;
-  - when it was added and when it's due;
+  - when it was lent and when it's due;
   - the receipt (view it, or add one later);
   - the full **payment history**, with undo for the last payment;
   - delete, with a confirmation
@@ -130,7 +130,7 @@ All `/loans` and `/me` routes need `Authorization: Bearer <token>`.
 | POST | `/auth/otp` | `{ phone }` | Prints the code to the server log |
 | POST | `/auth/verify` | `{ phone, code }` | `{ token }` (valid 7 days) |
 | GET | `/loans` | | `{ today, loans: [...] }`, each with `status`: `due`, `overdue` or `repaid` |
-| POST | `/loans` | `{ friendName, amount: "1500.50", dueDate: "2026-11-01" }` | `{ loan }` |
+| POST | `/loans` | `{ friendName, amount: "1500.50", lentOn?: "2026-10-01", dueDate: "2026-11-01" }` | `{ loan }`. `lentOn` defaults to today, or to the due date for an old loan |
 | GET | `/loans/:id` | | `{ loan, payments }` (history, newest first) |
 | POST | `/loans/:id/payments` | `{ amount: "500" }` | `{ loan }`, or 400 if it's more than what's pending |
 | PATCH | `/loans/:id/repay` | | `{ loan }` (pays whatever is left) |
