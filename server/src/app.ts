@@ -29,18 +29,32 @@ const phoneSchema = z
   .transform((p) => (/^\d{10}$/.test(p) ? `+91${p}` : p))
   .pipe(z.string().regex(/^\+[1-9]\d{9,14}$/, 'Enter a valid phone number'))
 
+// Rupee string -> positive whole paise, shared by loans and payments.
+const amountSchema = z.string().transform((a, ctx) => {
+  try {
+    const paise = rupeesToPaise(a)
+    if (paise > 0) return paise
+  } catch {}
+  ctx.addIssue({ code: 'custom', message: 'Amount must be more than 0, with at most 2 decimals' })
+  return z.NEVER
+})
+
 const loanSchema = z.object({
   friendName: z.string().trim().min(1, 'Friend name is required').max(80),
-  amount: z.string().transform((a, ctx) => {
-    try {
-      const paise = rupeesToPaise(a)
-      if (paise > 0) return paise
-    } catch {}
-    ctx.addIssue({ code: 'custom', message: 'Amount must be more than 0, with at most 2 decimals' })
-    return z.NEVER
-  }),
+  amount: amountSchema,
   dueDate: z.iso.date('Due date must be YYYY-MM-DD'),
 })
+
+// UPI IDs look like name@bank (e.g. runal@okaxis). Empty string clears it.
+const profileSchema = z.object({
+  upiId: z
+    .string()
+    .trim()
+    .transform((v) => v || null)
+    .pipe(z.string().regex(/^[a-zA-Z0-9._-]{2,256}@[a-zA-Z]{2,64}$/, 'Enter a UPI ID like name@bank').nullable()),
+})
+
+const idParam = (raw: string) => z.coerce.number().int().positive().parse(raw)
 
 const RECEIPT_TYPES: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
 const MAX_RECEIPT_BYTES = 5 * 1024 * 1024
@@ -131,58 +145,144 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
   }
   app.use('/loans', requireUser)
   app.use('/loans/*', requireUser)
+  app.use('/me', requireUser)
 
-  const loanFields = `id, friend_name AS "friendName", amount_paise AS "amountPaise", due_date AS "dueDate",
-    repaid_at AS "repaidAt", receipt_file IS NOT NULL AS "hasReceipt", created_at AS "createdAt"`
+  const loanFields = `id, friend_name AS "friendName", amount_paise AS "amountPaise", paid_paise AS "paidPaise",
+    due_date AS "dueDate", repaid_at AS "repaidAt", receipt_file IS NOT NULL AS "hasReceipt", created_at AS "createdAt"`
+
+  type LoanRow = { repaidAt: string | null; dueDate: string }
+  // Fully repaid -> "repaid"; otherwise past the due date (in IST) -> "overdue"; else "due".
+  const withStatus = <T extends LoanRow>(l: T, today = todayIn(now())) => ({
+    ...l,
+    status: l.repaidAt ? 'repaid' : l.dueDate < today ? 'overdue' : 'due',
+  })
+
+  /**
+   * Records a payment in ONE statement: the loan's running total and the payments ledger change together.
+   * The WHERE clause refuses anything above what's still owed, and Postgres locks the row while updating,
+   * so two taps at the same moment can't overpay. Returns null if the loan isn't yours or the amount is too big.
+   */
+  async function recordPayment(loanId: number, userId: number, paise: number) {
+    const [loan] = await db.query<LoanRow>(
+      `WITH upd AS (
+         UPDATE loans
+         SET paid_paise = paid_paise + $3::bigint,
+             repaid_at = CASE WHEN paid_paise + $3::bigint = amount_paise THEN $4::timestamptz ELSE repaid_at END
+         WHERE id = $1 AND user_id = $2 AND paid_paise + $3::bigint <= amount_paise
+         RETURNING *
+       ), pay AS (
+         INSERT INTO payments (loan_id, amount_paise, paid_at) SELECT id, $3::bigint, $4::timestamptz FROM upd
+       )
+       SELECT ${loanFields} FROM upd`,
+      [loanId, userId, paise, now()],
+    )
+    return loan ? withStatus(loan) : null
+  }
+
+  const findLoan = async (id: number, userId: number) => {
+    const [loan] = await db.query<LoanRow & { amountPaise: number; paidPaise: number }>(
+      `SELECT ${loanFields} FROM loans WHERE id = $1 AND user_id = $2`,
+      [id, userId],
+    )
+    return loan ? withStatus(loan) : null
+  }
 
   app.get('/loans', async (c) => {
     const today = todayIn(now())
-    const rows = await db.query<{ repaidAt: string | null; dueDate: string }>(
+    const rows = await db.query<LoanRow>(
       `SELECT ${loanFields} FROM loans WHERE user_id = $1
        ORDER BY (repaid_at IS NOT NULL), due_date, id`,
       [c.get('userId')],
     )
-    const loans = rows.map((l) => ({
-      ...l,
-      status: l.repaidAt ? 'repaid' : l.dueDate < today ? 'overdue' : 'due',
-    }))
-    return c.json({ today, loans })
+    return c.json({ today, loans: rows.map((l) => withStatus(l, today)) })
+  })
+
+  // Registered before /loans/:id so "summary" is never read as an id.
+  app.get('/loans/summary', async (c) => {
+    const [s] = await db.query(
+      `SELECT
+         COALESCE(SUM(amount_paise), 0)::bigint AS "totalLentPaise",
+         COALESCE(SUM(paid_paise), 0)::bigint AS "totalRepaidPaise",
+         COALESCE(SUM(amount_paise - paid_paise) FILTER (WHERE repaid_at IS NULL AND due_date < $2), 0)::bigint AS "overduePaise",
+         COUNT(*) FILTER (WHERE repaid_at IS NULL AND due_date < $2) AS "overdueCount"
+       FROM loans WHERE user_id = $1`,
+      [c.get('userId'), todayIn(now())],
+    )
+    return c.json(s)
+  })
+
+  // One loan with its payment history, newest first.
+  app.get('/loans/:id{[0-9]+}', async (c) => {
+    const id = idParam(c.req.param('id'))
+    const loan = await findLoan(id, c.get('userId'))
+    if (!loan) return c.json({ error: 'Loan not found' }, 404)
+    const payments = await db.query(
+      `SELECT id, amount_paise AS "amountPaise", paid_at AS "paidAt" FROM payments WHERE loan_id = $1 ORDER BY id DESC`,
+      [id],
+    )
+    return c.json({ loan, payments })
   })
 
   app.post('/loans', async (c) => {
     const body = loanSchema.parse(await c.req.json())
-    const [loan] = await db.query(
+    const [loan] = await db.query<LoanRow>(
       `INSERT INTO loans (user_id, friend_name, amount_paise, due_date) VALUES ($1, $2, $3, $4)
        RETURNING ${loanFields}`,
       [c.get('userId'), body.friendName, body.amount, body.dueDate],
     )
-    return c.json({ loan }, 201)
+    return c.json({ loan: withStatus(loan) }, 201)
   })
 
-  // Idempotent: repaying twice keeps the first repaid_at. Other users' loans look like "not found".
+  // Part payment: "Asha gave back ₹500". Can't exceed what's still pending.
+  app.post('/loans/:id/payments', async (c) => {
+    const id = idParam(c.req.param('id'))
+    const { amount } = z.object({ amount: amountSchema }).parse(await c.req.json())
+    const loan = await recordPayment(id, c.get('userId'), amount)
+    if (loan) return c.json({ loan }, 201)
+    const current = await findLoan(id, c.get('userId'))
+    if (!current) return c.json({ error: 'Loan not found' }, 404)
+    return c.json({ error: `That's more than the ₹${((current.amountPaise - current.paidPaise) / 100).toFixed(2)} still pending` }, 400)
+  })
+
+  // "Mark repaid" = pay whatever is left. Idempotent: if nothing is left, nothing changes.
   app.patch('/loans/:id/repay', async (c) => {
-    const id = z.coerce.number().int().positive().parse(c.req.param('id'))
-    const [loan] = await db.query(
-      `UPDATE loans SET repaid_at = COALESCE(repaid_at, $3) WHERE id = $1 AND user_id = $2
-       RETURNING ${loanFields}`,
-      [id, c.get('userId'), now()],
-    )
-    return loan ? c.json({ loan }) : c.json({ error: 'Loan not found' }, 404)
+    const id = idParam(c.req.param('id'))
+    const current = await findLoan(id, c.get('userId'))
+    if (!current) return c.json({ error: 'Loan not found' }, 404)
+    const remaining = current.amountPaise - current.paidPaise
+    if (remaining === 0) return c.json({ loan: current })
+    const loan = await recordPayment(id, c.get('userId'), remaining)
+    // A payment landed in between: return the fresh state instead of overpaying.
+    return c.json({ loan: loan ?? (await findLoan(id, c.get('userId'))) })
   })
 
-  // Undo for an accidental "Mark repaid".
-  app.patch('/loans/:id/unrepay', async (c) => {
-    const id = z.coerce.number().int().positive().parse(c.req.param('id'))
-    const [loan] = await db.query(
-      `UPDATE loans SET repaid_at = NULL WHERE id = $1 AND user_id = $2 RETURNING ${loanFields}`,
+  // Undo: removes the most recent payment and puts its amount back on the loan.
+  app.delete('/loans/:id/payments/last', async (c) => {
+    const id = idParam(c.req.param('id'))
+    const [loan] = await db.query<LoanRow>(
+      `WITH last AS (
+         DELETE FROM payments WHERE id = (
+           SELECT p.id FROM payments p JOIN loans l ON l.id = p.loan_id
+           WHERE l.id = $1 AND l.user_id = $2 ORDER BY p.id DESC LIMIT 1
+         )
+         RETURNING loan_id, amount_paise
+       ), upd AS (
+         UPDATE loans SET paid_paise = loans.paid_paise - last.amount_paise, repaid_at = NULL
+         FROM last WHERE loans.id = last.loan_id
+         RETURNING loans.*
+       )
+       SELECT ${loanFields} FROM upd`,
       [id, c.get('userId')],
     )
-    return loan ? c.json({ loan }) : c.json({ error: 'Loan not found' }, 404)
+    if (loan) return c.json({ loan: withStatus(loan) })
+    return (await findLoan(id, c.get('userId')))
+      ? c.json({ error: 'No payment to undo' }, 400)
+      : c.json({ error: 'Loan not found' }, 404)
   })
 
-  // Delete a loan entered by mistake (and its receipt file).
+  // Delete a loan entered by mistake (its payments go with it, and so does the receipt file).
   app.delete('/loans/:id', async (c) => {
-    const id = z.coerce.number().int().positive().parse(c.req.param('id'))
+    const id = idParam(c.req.param('id'))
     const [row] = await db.query<{ receipt_file: string | null }>(
       'DELETE FROM loans WHERE id = $1 AND user_id = $2 RETURNING receipt_file',
       [id, c.get('userId')],
@@ -192,22 +292,24 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
     return c.body(null, 204)
   })
 
-  app.get('/loans/summary', async (c) => {
-    const [s] = await db.query(
-      `SELECT
-         COALESCE(SUM(amount_paise), 0)::bigint AS "totalLentPaise",
-         COALESCE(SUM(amount_paise) FILTER (WHERE repaid_at IS NOT NULL), 0)::bigint AS "totalRepaidPaise",
-         COALESCE(SUM(amount_paise) FILTER (WHERE repaid_at IS NULL AND due_date < $2), 0)::bigint AS "overduePaise",
-         COUNT(*) FILTER (WHERE repaid_at IS NULL AND due_date < $2) AS "overdueCount"
-       FROM loans WHERE user_id = $1`,
-      [c.get('userId'), todayIn(now())],
+  // ---- Profile: your UPI ID goes into WhatsApp reminders so friends can pay you directly ----
+  app.get('/me', async (c) => {
+    const [me] = await db.query(`SELECT phone, upi_id AS "upiId" FROM users WHERE id = $1`, [c.get('userId')])
+    return me ? c.json(me) : c.json({ error: 'Please log in again' }, 401)
+  })
+
+  app.patch('/me', async (c) => {
+    const { upiId } = profileSchema.parse(await c.req.json())
+    const [me] = await db.query(
+      `UPDATE users SET upi_id = $2 WHERE id = $1 RETURNING phone, upi_id AS "upiId"`,
+      [c.get('userId'), upiId],
     )
-    return c.json(s)
+    return c.json(me)
   })
 
   // ---- Bonus: receipt photo per loan ----
   app.post('/loans/:id/receipt', async (c) => {
-    const id = z.coerce.number().int().positive().parse(c.req.param('id'))
+    const id = idParam(c.req.param('id'))
     const body = await c.req.parseBody()
     const file = body.receipt
     if (!(file instanceof File)) return c.json({ error: 'Attach an image as "receipt"' }, 400)
@@ -217,18 +319,18 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
     if (!type) return c.json({ error: 'Receipt must be a JPEG, PNG or WebP image' }, 400)
 
     const name = `${randomUUID()}.${RECEIPT_TYPES[type]}`
-    const [loan] = await db.query(
+    const [loan] = await db.query<LoanRow>(
       `UPDATE loans SET receipt_file = $3 WHERE id = $1 AND user_id = $2 RETURNING ${loanFields}`,
       [id, c.get('userId'), name],
     )
     if (!loan) return c.json({ error: 'Loan not found' }, 404)
     await mkdir(uploadsDir, { recursive: true })
     await writeFile(join(uploadsDir, name), bytes)
-    return c.json({ loan })
+    return c.json({ loan: withStatus(loan) })
   })
 
   app.get('/loans/:id/receipt', async (c) => {
-    const id = z.coerce.number().int().positive().parse(c.req.param('id'))
+    const id = idParam(c.req.param('id'))
     const [row] = await db.query<{ receipt_file: string | null }>(
       'SELECT receipt_file FROM loans WHERE id = $1 AND user_id = $2',
       [id, c.get('userId')],

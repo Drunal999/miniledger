@@ -19,7 +19,7 @@ afterEach(() => db.close())
 beforeEach(async () => {
   clock = new Date('2026-10-22T04:30:00Z')
   db = await openDb({ url: process.env.TEST_DATABASE_URL }) // fresh database per test
-  if (process.env.TEST_DATABASE_URL) await db.query('TRUNCATE users, otp_codes, loans RESTART IDENTITY CASCADE')
+  if (process.env.TEST_DATABASE_URL) await db.query('TRUNCATE users, otp_codes, loans, payments RESTART IDENTITY CASCADE')
   app = createApp({ db, jwtSecret: 'test', uploadsDir: await mkdtemp(join(tmpdir(), 'ml-')), now: () => clock })
   codes = []
   console.log = (msg: string) => { const m = /-> (\d{6})/.exec(msg); if (m) codes.push(m[1]) }
@@ -131,20 +131,68 @@ test('summary: totals and overdue are exact, and repaying is idempotent', async 
   ])
 })
 
-test('undo repaid and delete: both work, and only on your own loans', async () => {
+test('undo and delete: both work, and only on your own loans', async () => {
   const t = await login('9000000001')
   clock = new Date(clock.getTime() + 31_000)
   const other = await login('9000000002')
   const { loan } = (await (await call('POST', '/loans', { friendName: 'Asha', amount: '100', dueDate: '2026-11-01' }, t)).json()) as { loan: { id: number } }
 
   await call('PATCH', `/loans/${loan.id}/repay`, undefined, t)
-  const undone = (await (await call('PATCH', `/loans/${loan.id}/unrepay`, undefined, t)).json()) as { loan: { repaidAt: string | null } }
+  const undone = (await (await call('DELETE', `/loans/${loan.id}/payments/last`, undefined, t)).json()) as { loan: { repaidAt: string | null; paidPaise: number; status: string } }
   assert.equal(undone.loan.repaidAt, null)
+  assert.equal(undone.loan.paidPaise, 0)
+  assert.equal(undone.loan.status, 'due')
+  assert.equal((await call('DELETE', `/loans/${loan.id}/payments/last`, undefined, t)).status, 400) // nothing left to undo
 
-  assert.equal((await call('PATCH', `/loans/${loan.id}/unrepay`, undefined, other)).status, 404)
+  assert.equal((await call('DELETE', `/loans/${loan.id}/payments/last`, undefined, other)).status, 404)
   assert.equal((await call('DELETE', `/loans/${loan.id}`, undefined, other)).status, 404)
   assert.equal((await call('DELETE', `/loans/${loan.id}`, undefined, t)).status, 204)
   assert.deepEqual(((await (await call('GET', '/loans', undefined, t)).json()) as { loans: unknown[] }).loans, [])
+})
+
+test('part payments: running total, history, and no overpaying', async () => {
+  const t = await login()
+  const { loan } = (await (await call('POST', '/loans', { friendName: 'Ravi', amount: '800', dueDate: '2026-10-10' }, t)).json()) as { loan: { id: number } }
+  const pay = (amount: string) => call('POST', `/loans/${loan.id}/payments`, { amount }, t)
+
+  const first = (await (await pay('300')).json()) as { loan: { paidPaise: number; status: string } }
+  assert.equal(first.loan.paidPaise, 30000)
+  assert.equal(first.loan.status, 'overdue') // still owes 500, and the due date has passed
+
+  const s1 = (await (await call('GET', '/loans/summary', undefined, t)).json()) as { totalRepaidPaise: number; overduePaise: number }
+  assert.equal(s1.totalRepaidPaise, 30000)
+  assert.equal(s1.overduePaise, 50000) // only what's still pending counts as overdue
+
+  const tooMuch = await pay('500.01')
+  assert.equal(tooMuch.status, 400)
+  assert.match(((await tooMuch.json()) as { error: string }).error, /500\.00 still pending/)
+
+  const last = (await (await pay('500')).json()) as { loan: { paidPaise: number; status: string; repaidAt: string } }
+  assert.equal(last.loan.status, 'repaid')
+  assert.ok(last.loan.repaidAt)
+
+  const detail = (await (await call('GET', `/loans/${loan.id}`, undefined, t)).json()) as { payments: { amountPaise: number }[] }
+  assert.deepEqual(detail.payments.map((p) => p.amountPaise), [50000, 30000]) // newest first
+})
+
+test('two payments at the same moment cannot overpay', async () => {
+  const t = await login()
+  const { loan } = (await (await call('POST', '/loans', { friendName: 'Asha', amount: '800', dueDate: '2026-11-01' }, t)).json()) as { loan: { id: number } }
+  // Both ask for 500 of an 800 loan at once; only one can fit.
+  const results = await Promise.all([0, 1].map(() => call('POST', `/loans/${loan.id}/payments`, { amount: '500' }, t)))
+  assert.deepEqual(results.map((r) => r.status).sort(), [201, 400])
+  const detail = (await (await call('GET', `/loans/${loan.id}`, undefined, t)).json()) as { loan: { paidPaise: number }; payments: unknown[] }
+  assert.equal(detail.loan.paidPaise, 50000)
+  assert.equal(detail.payments.length, 1)
+})
+
+test('profile: save a UPI ID, reject a bad one, clear it', async () => {
+  const t = await login()
+  const save = (upiId: string) => call('PATCH', '/me', { upiId }, t)
+  assert.deepEqual(await (await save('runal@okaxis')).json(), { phone: '+919876543210', upiId: 'runal@okaxis' })
+  assert.equal((await save('not a upi id')).status, 400)
+  assert.equal(((await (await save('')).json()) as { upiId: string | null }).upiId, null)
+  assert.equal((await call('GET', '/me')).status, 401) // needs a token
 })
 
 test('overdue flips at midnight India time, not UTC', async () => {

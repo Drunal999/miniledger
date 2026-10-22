@@ -2,6 +2,7 @@
 CREATE TABLE IF NOT EXISTS users (
   id          SERIAL PRIMARY KEY,
   phone       TEXT NOT NULL UNIQUE,
+  upi_id      TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -14,11 +15,13 @@ CREATE TABLE IF NOT EXISTS otp_codes (
   created_at  TIMESTAMPTZ NOT NULL
 );
 
+-- paid_paise is the running total of this loan's payments. repaid_at is set when it reaches the full amount.
 CREATE TABLE IF NOT EXISTS loans (
   id            SERIAL PRIMARY KEY,
   user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   friend_name   TEXT NOT NULL CHECK (length(friend_name) BETWEEN 1 AND 80),
   amount_paise  BIGINT NOT NULL CHECK (amount_paise > 0),
+  paid_paise    BIGINT NOT NULL DEFAULT 0 CHECK (paid_paise >= 0 AND paid_paise <= amount_paise),
   due_date      DATE NOT NULL,
   repaid_at     TIMESTAMPTZ,
   receipt_file  TEXT,
@@ -26,3 +29,13 @@ CREATE TABLE IF NOT EXISTS loans (
 );
 
 CREATE INDEX IF NOT EXISTS loans_user_idx ON loans (user_id, due_date);
+
+-- Every repayment is its own row (a ledger), so the history is never lost when money comes back in parts.
+CREATE TABLE IF NOT EXISTS payments (
+  id            SERIAL PRIMARY KEY,
+  loan_id       INT NOT NULL REFERENCES loans(id) ON DELETE CASCADE,
+  amount_paise  BIGINT NOT NULL CHECK (amount_paise > 0),
+  paid_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS payments_loan_idx ON payments (loan_id);

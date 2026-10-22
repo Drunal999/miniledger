@@ -21,19 +21,23 @@ const [user] = await db.query<{ id: number }>(
 )
 await db.query('DELETE FROM loans WHERE user_id = $1', [user.id])
 
-const loans: [string, number, number, boolean][] = [
-  // friend, amount in paise, due in N days (negative = past), repaid?
-  ['Asha Rao', 250_000, -12, false],
-  ['Ravi Kumar', 80_000, -3, false],
-  ['Meena Iyer', 150_050, 2, false],
-  ['Kiran', 50_000, 14, false],
-  ['Arjun Shah', 120_000, -20, true],
+const loans: [string, number, number, number[]][] = [
+  // friend, amount in paise, due in N days (negative = past), payments already received (paise)
+  ['Asha Rao', 250_000, -12, []],
+  ['Ravi Kumar', 80_000, -3, [30_000]], // part paid
+  ['Meena Iyer', 150_050, 2, []],
+  ['Kiran', 50_000, 14, []],
+  ['Asha Rao', 40_000, 25, []],
+  ['Arjun Shah', 120_000, -20, [70_000, 50_000]], // paid back in two parts
 ]
-for (const [name, paise, days, repaid] of loans) {
-  await db.query(
-    `INSERT INTO loans (user_id, friend_name, amount_paise, due_date, repaid_at) VALUES ($1, $2, $3, $4, $5)`,
-    [user.id, name, paise, shift(days), repaid ? new Date() : null],
+for (const [name, paise, days, payments] of loans) {
+  const paid = payments.reduce((a, b) => a + b, 0)
+  const [loan] = await db.query<{ id: number }>(
+    `INSERT INTO loans (user_id, friend_name, amount_paise, paid_paise, due_date, repaid_at)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    [user.id, name, paise, paid, shift(days), paid === paise ? new Date() : null],
   )
+  for (const p of payments) await db.query('INSERT INTO payments (loan_id, amount_paise) VALUES ($1, $2)', [loan.id, p])
 }
 console.log(`Seeded ${loans.length} loans for ${phone}. Log in with that number; the code prints in the server log.`)
 await db.close()

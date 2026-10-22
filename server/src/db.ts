@@ -35,6 +35,8 @@ export async function openDb(opts: { url?: string; dataDir?: string } = {}): Pro
     }
   }
   const schema = await readFile(new URL('./schema.sql', import.meta.url), 'utf8')
-  for (const stmt of schema.split(';').map((s) => s.trim()).filter(Boolean)) await db.query(stmt)
+  // Strip "-- comments" first, so a semicolon inside a comment can't split a statement in half.
+  const statements = schema.replace(/--.*$/gm, '').split(';').map((s) => s.trim()).filter(Boolean)
+  for (const stmt of statements) await db.query(stmt)
   return db
 }
