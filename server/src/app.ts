@@ -6,7 +6,7 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { SignJWT, jwtVerify } from 'jose'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Db } from './db.ts'
 import { rupeesToPaise } from './money.ts'
@@ -168,6 +168,28 @@ export function createApp({ db, jwtSecret, uploadsDir, now = () => new Date() }:
       [id, c.get('userId'), now()],
     )
     return loan ? c.json({ loan }) : c.json({ error: 'Loan not found' }, 404)
+  })
+
+  // Undo for an accidental "Mark repaid".
+  app.patch('/loans/:id/unrepay', async (c) => {
+    const id = z.coerce.number().int().positive().parse(c.req.param('id'))
+    const [loan] = await db.query(
+      `UPDATE loans SET repaid_at = NULL WHERE id = $1 AND user_id = $2 RETURNING ${loanFields}`,
+      [id, c.get('userId')],
+    )
+    return loan ? c.json({ loan }) : c.json({ error: 'Loan not found' }, 404)
+  })
+
+  // Delete a loan entered by mistake (and its receipt file).
+  app.delete('/loans/:id', async (c) => {
+    const id = z.coerce.number().int().positive().parse(c.req.param('id'))
+    const [row] = await db.query<{ receipt_file: string | null }>(
+      'DELETE FROM loans WHERE id = $1 AND user_id = $2 RETURNING receipt_file',
+      [id, c.get('userId')],
+    )
+    if (!row) return c.json({ error: 'Loan not found' }, 404)
+    if (row.receipt_file) await rm(join(uploadsDir, row.receipt_file), { force: true })
+    return c.body(null, 204)
   })
 
   app.get('/loans/summary', async (c) => {

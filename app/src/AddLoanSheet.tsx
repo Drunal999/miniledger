@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ActivityIndicator, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import DateTimePicker from '@react-native-community/datetimepicker'
 import * as ImagePicker from 'expo-image-picker'
-import { api, type Loan } from './api'
+import { api, formatINR, type Loan } from './api'
 import { colors } from './theme'
 
 type Photo = { uri: string; mimeType?: string; fileName?: string | null }
@@ -23,9 +23,19 @@ async function uploadReceipt(loanId: number, photo: Photo, token: string) {
   return api<{ loan: Loan }>(`/loans/${loanId}/receipt`, { method: 'POST', body: form }, token)
 }
 
-export function AddLoanSheet({ visible, token, onClose, onSaved }: {
+const DUE_PRESETS: [string, number][] = [['1 week', 7], ['2 weeks', 14], ['1 month', 30]]
+
+/** "1500.5" -> "₹1,500.50" while typing, or null if it isn't a valid amount yet. */
+function previewAmount(a: string) {
+  if (!/^\d{1,9}(\.\d{1,2})?$/.test(a.trim())) return null
+  const [r, p = ''] = a.trim().split('.')
+  return formatINR(Number(r) * 100 + Number(p.padEnd(2, '0')))
+}
+
+export function AddLoanSheet({ visible, token, recentFriends, onClose, onSaved }: {
   visible: boolean
   token: string
+  recentFriends: string[]
   onClose: () => void
   onSaved: () => void
 }) {
@@ -81,12 +91,38 @@ export function AddLoanSheet({ visible, token, onClose, onSaved }: {
         </View>
 
         <Text style={styles.label}>Friend's name</Text>
-        <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Asha" maxLength={80} autoFocus />
+        <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Asha" maxLength={80} autoFocus accessibilityLabel="Friend's name" />
+        {recentFriends.length > 0 && (
+          <View style={styles.chips}>
+            {recentFriends.slice(0, 5).map((f) => (
+              <Pressable key={f} style={[styles.chip, name === f && styles.chipActive]} onPress={() => setName(f)} accessibilityRole="button" accessibilityLabel={`Use ${f}`}>
+                <Text style={[styles.chipText, name === f && styles.chipTextActive]}>{f}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
 
-        <Text style={styles.label}>Amount (₹)</Text>
-        <TextInput style={styles.input} value={amount} onChangeText={setAmount} placeholder="1500" keyboardType="decimal-pad" />
+        <Text style={styles.label}>Amount</Text>
+        <View style={styles.amountRow}>
+          <Text style={styles.rupee}>₹</Text>
+          <TextInput style={styles.amountInput} value={amount} onChangeText={(t) => setAmount(t.replace(/[^\d.]/g, ''))} placeholder="1500" keyboardType="decimal-pad" accessibilityLabel="Amount in rupees" />
+        </View>
+        {previewAmount(amount) && <Text style={styles.preview}>{previewAmount(amount)}</Text>}
 
         <Text style={styles.label}>Due date</Text>
+        <View style={styles.chips}>
+          {DUE_PRESETS.map(([label, days]) => (
+            <Pressable
+              key={label}
+              style={styles.chip}
+              onPress={() => { setDue(inDays(days)); setDueText(toISODate(inDays(days))) }}
+              accessibilityRole="button"
+              accessibilityLabel={`Due in ${label}`}
+            >
+              <Text style={styles.chipText}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
         {Platform.OS === 'web' ? (
           <TextInput style={styles.input} value={dueText} onChangeText={setDueText} placeholder="YYYY-MM-DD" />
         ) : (
@@ -137,6 +173,15 @@ const styles = StyleSheet.create({
   label: { fontSize: 14, fontWeight: '600', color: colors.ink, marginTop: 16, marginBottom: 6 },
   input: { borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 14, fontSize: 16, backgroundColor: '#fff' },
   inputText: { fontSize: 16, color: colors.ink },
+  amountRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: colors.line, borderRadius: 12, backgroundColor: '#fff' },
+  rupee: { paddingLeft: 14, fontSize: 20, fontWeight: '700', color: colors.muted },
+  amountInput: { flex: 1, padding: 14, fontSize: 20, fontWeight: '700' },
+  preview: { color: colors.muted, marginTop: 6 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8, marginBottom: 4 },
+  chip: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 16, backgroundColor: '#fff', borderWidth: 1, borderColor: colors.line },
+  chipActive: { backgroundColor: colors.brand, borderColor: colors.brand },
+  chipText: { color: colors.ink, fontSize: 13, fontWeight: '600' },
+  chipTextActive: { color: '#fff' },
   photoRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   thumb: { width: 64, height: 64, borderRadius: 8 },
   secondary: { borderWidth: 1, borderColor: colors.brand, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 14 },

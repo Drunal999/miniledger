@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ActivityIndicator, FlatList, Image, Linking, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Alert, FlatList, Image, Linking, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { useNetInfo } from '@react-native-community/netinfo'
 import * as Haptics from 'expo-haptics'
 import { api, API_URL, ApiError, formatINR, type Loan, type Summary } from './api'
@@ -25,6 +25,17 @@ function remindOnWhatsApp(loan: Loan, today: string) {
   Linking.openURL(`https://wa.me/?text=${encodeURIComponent(text)}`)
 }
 
+/** Native confirm dialog on phones; the browser's confirm() on web, where Alert buttons don't exist. */
+function confirmAsync(title: string, message: string, action: string) {
+  if (Platform.OS === 'web') return Promise.resolve(window.confirm(`${title}\n\n${message}`))
+  return new Promise<boolean>((resolve) =>
+    Alert.alert(title, message, [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: action, style: 'destructive', onPress: () => resolve(true) },
+    ]),
+  )
+}
+
 export function HomeScreen({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [loans, setLoans] = useState<Loan[] | null>(null)
   const [today, setToday] = useState('')
@@ -34,6 +45,14 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
   const [adding, setAdding] = useState(false)
   const [receiptFor, setReceiptFor] = useState<number | null>(null)
   const [filter, setFilter] = useState<Filter>('all')
+  const [undo, setUndo] = useState<{ id: number; name: string } | null>(null)
+
+  // The "Undo" bar disappears after 5 seconds.
+  useEffect(() => {
+    if (!undo) return
+    const t = setTimeout(() => setUndo(null), 5000)
+    return () => clearTimeout(t)
+  }, [undo])
   const { isConnected } = useNetInfo()
   const offline = isConnected === false
 
@@ -68,9 +87,33 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
     if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
     try {
       await api(`/loans/${id}/repay`, { method: 'PATCH' }, token)
+      setUndo({ id, name: before?.find((l) => l.id === id)?.friendName ?? '' })
       await load()
     } catch (e) {
       setLoans(before)
+      setError((e as Error).message)
+    }
+  }
+
+  async function undoRepaid() {
+    if (!undo) return
+    const { id } = undo
+    setUndo(null)
+    try {
+      await api(`/loans/${id}/unrepay`, { method: 'PATCH' }, token)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  async function deleteLoan(loan: Loan) {
+    const ok = await confirmAsync('Delete this loan?', `${loan.friendName}, ${formatINR(loan.amountPaise)}. This can't be undone.`, 'Delete')
+    if (!ok) return
+    try {
+      await api(`/loans/${loan.id}`, { method: 'DELETE' }, token)
+      await load()
+    } catch (e) {
       setError((e as Error).message)
     }
   }
@@ -85,6 +128,8 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
     repaid: loans?.filter((l) => l.status === 'repaid').length ?? 0,
   }
   const shown = (loans ?? []).filter((l) => filter === 'all' || l.status === filter)
+  // Most recently added friends first, no duplicates: one tap to reuse a name.
+  const recentFriends = [...new Set([...(loans ?? [])].sort((a, b) => b.id - a.id).map((l) => l.friendName))]
 
   return (
     <View style={styles.screen}>
@@ -134,15 +179,28 @@ export function HomeScreen({ token, onLogout }: { token: string; onLogout: () =>
             onRepay={() => markRepaid(item.id)}
             onRemind={() => remindOnWhatsApp(item, today)}
             onReceipt={() => setReceiptFor(item.id)}
+            onDelete={() => deleteLoan(item)}
           />
         )}
+        ListFooterComponent={(loans?.length ?? 0) > 0 ? <Text style={styles.footerHint}>Tip: press and hold a loan to delete it.</Text> : null}
       />
 
-      <Pressable style={[styles.fab, offline && { opacity: 0.4 }]} disabled={offline} onPress={() => setAdding(true)}>
-        <Text style={styles.fabText}>+ Add loan</Text>
-      </Pressable>
+      {undo && (
+        <View style={styles.toast} accessibilityLiveRegion="polite">
+          <Text style={styles.toastText} numberOfLines={1}>Marked {undo.name}'s loan as repaid</Text>
+          <Pressable onPress={undoRepaid} hitSlop={10} accessibilityRole="button" accessibilityLabel="Undo">
+            <Text style={styles.toastUndo}>UNDO</Text>
+          </Pressable>
+        </View>
+      )}
 
-      <AddLoanSheet visible={adding} token={token} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
+      {!undo && (
+        <Pressable style={[styles.fab, offline && { opacity: 0.4 }]} disabled={offline} onPress={() => setAdding(true)} accessibilityRole="button" accessibilityLabel="Add loan">
+          <Text style={styles.fabText}>+ Add loan</Text>
+        </Pressable>
+      )}
+
+      <AddLoanSheet visible={adding} token={token} recentFriends={recentFriends} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
 
       <Modal visible={receiptFor !== null} transparent animationType="fade" onRequestClose={() => setReceiptFor(null)}>
         <Pressable style={styles.viewer} onPress={() => setReceiptFor(null)}>
@@ -187,13 +245,14 @@ const Stat = ({ label, value, danger }: { label: string; value: string; danger?:
   </View>
 )
 
-function LoanRow({ loan, today, disabled, onRepay, onRemind, onReceipt }: {
+function LoanRow({ loan, today, disabled, onRepay, onRemind, onReceipt, onDelete }: {
   loan: Loan
   today: string
   disabled: boolean
   onRepay: () => void
   onRemind: () => void
   onReceipt: () => void
+  onDelete: () => void
 }) {
   const overdue = loan.status === 'overdue'
   const repaid = loan.status === 'repaid'
@@ -207,7 +266,13 @@ function LoanRow({ loan, today, disabled, onRepay, onRemind, onReceipt }: {
       : daysLeft === 0 ? 'Due today' : dueSoon ? `Due in ${daysLeft} day${daysLeft === 1 ? '' : 's'}` : `Due ${prettyDate(loan.dueDate)}`
 
   return (
-    <View style={[styles.row, overdue && styles.rowOverdue, dueSoon && styles.rowSoon, repaid && styles.rowRepaid]}>
+    <Pressable
+      onLongPress={disabled ? undefined : onDelete}
+      delayLongPress={500}
+      accessibilityLabel={`${loan.friendName}, ${formatINR(loan.amountPaise)}, ${sub}`}
+      accessibilityHint="Press and hold to delete"
+      style={[styles.row, overdue && styles.rowOverdue, dueSoon && styles.rowSoon, repaid && styles.rowRepaid]}
+    >
       <View style={[styles.avatar, { backgroundColor: avatarColor(loan.friendName) }]}>
         <Text style={styles.avatarText}>{initials(loan.friendName)}</Text>
       </View>
@@ -222,12 +287,12 @@ function LoanRow({ loan, today, disabled, onRepay, onRemind, onReceipt }: {
       <View style={{ alignItems: 'flex-end', gap: 8 }}>
         <Text style={[styles.amount, overdue && { color: colors.danger }]}>{formatINR(loan.amountPaise)}</Text>
         {!repaid && (
-          <Pressable style={[styles.repay, disabled && { opacity: 0.4 }]} disabled={disabled} onPress={onRepay}>
+          <Pressable style={[styles.repay, disabled && { opacity: 0.4 }]} disabled={disabled} onPress={onRepay} accessibilityRole="button" accessibilityLabel={`Mark ${loan.friendName}'s loan as repaid`}>
             <Text style={styles.repayText}>Mark repaid</Text>
           </Pressable>
         )}
       </View>
-    </View>
+    </Pressable>
   )
 }
 
@@ -272,6 +337,10 @@ const styles = StyleSheet.create({
   repayText: { color: '#fff', fontWeight: '700', fontSize: 12 },
   fab: { position: 'absolute', bottom: 32, alignSelf: 'center', backgroundColor: colors.brand, borderRadius: 28, paddingVertical: 16, paddingHorizontal: 28, elevation: 4 },
   fabText: { color: '#fff', fontWeight: '800', fontSize: 16 },
+  footerHint: { color: colors.muted, textAlign: 'center', fontSize: 12, marginTop: 8 },
+  toast: { position: 'absolute', bottom: 32, left: 16, right: 16, backgroundColor: colors.ink, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', elevation: 6 },
+  toastText: { color: '#fff', flex: 1, marginRight: 12 },
+  toastUndo: { color: '#A5B4FC', fontWeight: '800' },
   viewer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' },
   receipt: { width: '90%', height: '75%' },
   viewerHint: { color: '#fff', marginTop: 12 },

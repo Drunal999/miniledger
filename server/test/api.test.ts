@@ -131,6 +131,22 @@ test('summary: totals and overdue are exact, and repaying is idempotent', async 
   ])
 })
 
+test('undo repaid and delete: both work, and only on your own loans', async () => {
+  const t = await login('9000000001')
+  clock = new Date(clock.getTime() + 31_000)
+  const other = await login('9000000002')
+  const { loan } = (await (await call('POST', '/loans', { friendName: 'Asha', amount: '100', dueDate: '2026-11-01' }, t)).json()) as { loan: { id: number } }
+
+  await call('PATCH', `/loans/${loan.id}/repay`, undefined, t)
+  const undone = (await (await call('PATCH', `/loans/${loan.id}/unrepay`, undefined, t)).json()) as { loan: { repaidAt: string | null } }
+  assert.equal(undone.loan.repaidAt, null)
+
+  assert.equal((await call('PATCH', `/loans/${loan.id}/unrepay`, undefined, other)).status, 404)
+  assert.equal((await call('DELETE', `/loans/${loan.id}`, undefined, other)).status, 404)
+  assert.equal((await call('DELETE', `/loans/${loan.id}`, undefined, t)).status, 204)
+  assert.deepEqual(((await (await call('GET', '/loans', undefined, t)).json()) as { loans: unknown[] }).loans, [])
+})
+
 test('overdue flips at midnight India time, not UTC', async () => {
   const t = await login()
   await call('POST', '/loans', { friendName: 'Asha', amount: '100', dueDate: '2026-10-22' }, t)

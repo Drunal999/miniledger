@@ -22,6 +22,8 @@ npm install
 npm run dev
 ```
 
+Want to see a full app straight away? Before starting the API, run `npm run seed -- 9999999999`. It fills that number's account with five sample loans: overdue, due soon, due later and repaid. Then log in with that number.
+
 The API starts on `http://localhost:4000`. When you log in, the OTP is printed in this terminal:
 
 ```
@@ -49,7 +51,7 @@ Scan the QR code with Expo Go on your phone (same Wi-Fi as the laptop). Use your
 
 ```bash
 cd server
-npm test        # 12 tests, about 25 seconds
+npm test        # 13 tests, about 25 seconds
 npm run typecheck
 ```
 
@@ -57,14 +59,20 @@ CI runs the same tests on every push, once on PGlite and once on a real Postgres
 
 ## What it does
 
-- Log in with your phone number and a one-time code
+- Log in with your phone number and a one-time code. The code submits itself when the 6th digit is typed, and "Resend" counts down from 30 seconds to match the server's rule
 - Add a loan: friend's name, amount, due date, and optionally a photo of the receipt
+  - your recent friends appear as one-tap buttons
+  - the amount shows back as you type it ("₹1,500.50")
+  - due date presets: 1 week, 2 weeks, 1 month
 - See every loan, with overdue ones in red ("Overdue by 4 days")
-- Mark a loan as repaid (with a small vibration on the phone)
+- Mark a loan as repaid (with a small vibration on the phone), and **undo** it for 5 seconds in case you tapped by mistake
+- Press and hold a loan to **delete** it (with a confirmation), for anything entered wrongly
 - A summary card at the top: still to get back, total lent, repaid, overdue, and how much has come back so far
 - Filter the list: all, overdue, repaid
 - Loans due in the next 3 days are marked "Due in 2 days" in amber, before they turn red
 - "Remind on WhatsApp" opens WhatsApp with a polite reminder ready to send. You pick the chat, so the app never needs your friend's number
+
+Every button has an accessibility label, so the app works with VoiceOver and TalkBack.
 
 The app also handles the unhappy paths: loading spinners, a clear message when the server says no, an empty state, pull to refresh, and an offline banner that keeps the last list on screen and disables changes until you're back online.
 
@@ -109,6 +117,8 @@ All `/loans` routes need `Authorization: Bearer <token>`.
 | GET | `/loans` | | `{ today, loans: [...] }`, each with `status`: `due`, `overdue` or `repaid` |
 | POST | `/loans` | `{ friendName, amount: "1500.50", dueDate: "2026-11-01" }` | `{ loan }` |
 | PATCH | `/loans/:id/repay` | | `{ loan }` |
+| PATCH | `/loans/:id/unrepay` | | `{ loan }` (undo) |
+| DELETE | `/loans/:id` | | 204 (also deletes the receipt file) |
 | GET | `/loans/summary` | | `{ totalLentPaise, totalRepaidPaise, overduePaise, overdueCount }` |
 | POST | `/loans/:id/receipt` | multipart, field `receipt` | `{ loan }` |
 | GET | `/loans/:id/receipt` | | the image |
@@ -126,6 +136,7 @@ server/
   src/rateLimit.ts per-IP limit for the login endpoints
   src/app.ts       routes, auth middleware, validation
   src/index.ts     starts the server
+  src/seed.ts      sample data for a demo account
   test/            API tests (node:test)
 app/
   App.tsx              logged in? home : login
