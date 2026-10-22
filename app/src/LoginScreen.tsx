@@ -133,7 +133,7 @@ const styles = StyleSheet.create({
   label: { fontSize: 14, color: colors.ink, marginBottom: 8, fontWeight: '600' },
   phoneRow: { flexDirection: 'row', borderWidth: 1, borderColor: colors.line, borderRadius: 12, backgroundColor: '#fff', overflow: 'hidden' },
   prefix: { paddingHorizontal: 14, paddingVertical: 14, fontSize: 18, color: colors.muted, backgroundColor: '#F3F4F6', fontWeight: '600' },
-  phoneInput: { flex: 1, padding: 14, fontSize: 18 },
+  phoneInput: { flex: 1, padding: 14, fontSize: 18, letterSpacing: 0 },
   input: { borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 14, fontSize: 18, backgroundColor: '#fff' },
   code: { letterSpacing: 10, textAlign: 'center', fontSize: 26 },
   hint: { fontSize: 12, color: colors.muted, marginTop: 8 },

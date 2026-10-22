@@ -9,10 +9,9 @@ Track money you've lent to friends: who owes you, how much, and who's late.
 - **Demo video:** _link here_
 
 <p>
-  <img src="docs/screenshots/home.jpg" width="200" alt="Home: summary card, filters, overdue loans in red, due-soon in amber">
-  <img src="docs/screenshots/add-loan.jpg" width="200" alt="Add a loan: recent friends, amount preview, due-date presets, receipt photo">
-  <img src="docs/screenshots/login.jpg" width="200" alt="Login with phone number">
-  <img src="docs/screenshots/otp.jpg" width="200" alt="One-time code with resend countdown">
+  <img src="docs/screenshots/home.jpg" width="230" alt="Home: what you'll get back, status pills, a part-paid loan with a progress bar">
+  <img src="docs/screenshots/friends.jpg" width="230" alt="Friends: who owes you the most, with overdue counts and settled friends">
+  <img src="docs/screenshots/add-loan.jpg" width="230" alt="Add a loan: recent friends, rupee amount, due-date presets, receipt photo">
 </p>
 
 ## Run it

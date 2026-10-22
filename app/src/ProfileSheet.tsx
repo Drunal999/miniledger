@@ -119,7 +119,7 @@ const styles = StyleSheet.create({
   card: { backgroundColor: colors.card, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: colors.line, marginTop: 12 },
   cardTitle: { fontSize: 15, fontWeight: '700', color: colors.ink, marginBottom: 4 },
   help: { color: colors.muted, fontSize: 13, lineHeight: 18 },
-  input: { borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 14, fontSize: 16, backgroundColor: '#fff', marginTop: 12 },
+  input: { borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 14, fontSize: 16, backgroundColor: '#fff', marginTop: 12, letterSpacing: 0 },
   msg: { marginTop: 8 },
   switchRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
 })

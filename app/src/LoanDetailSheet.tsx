@@ -243,7 +243,7 @@ const styles = StyleSheet.create({
   receipt: { width: '100%', height: 260, borderRadius: 12, marginTop: 8, backgroundColor: '#F3F4F6' },
   amountRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: colors.line, borderRadius: 12, backgroundColor: '#fff' },
   rupee: { paddingLeft: 14, fontSize: 20, fontWeight: '700', color: colors.muted },
-  amountInput: { flex: 1, padding: 14, fontSize: 20, fontWeight: '700' },
+  amountInput: { flex: 1, padding: 14, fontSize: 20, fontWeight: '700', letterSpacing: 0 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
   chip: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 16, backgroundColor: colors.brandSoft },
   chipText: { color: colors.brand, fontWeight: '700', fontSize: 13 },
