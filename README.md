@@ -72,7 +72,7 @@ CI runs the same tests on every push, once on PGlite and once on a real Postgres
 - **Money often comes back in parts.** Record "got ₹500 back" on a loan and it shows what's left, with a progress bar. Paying more than what's pending is refused
 - Tap a loan for its **details**:
   - what's pending;
-  - when it was lent and when it's due;
+  - when it was added and when it's due;
   - the receipt (view it, or add one later);
   - the full **payment history**, with undo for the last payment;
   - delete, with a confirmation

@@ -83,7 +83,7 @@ export function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
             style={[styles.input, styles.code]}
             value={code}
             onChangeText={onCode}
-            placeholder="------"
+            placeholder="6-digit code"
             keyboardType="number-pad"
             textContentType="oneTimeCode"
             autoFocus
@@ -135,7 +135,8 @@ const styles = StyleSheet.create({
   prefix: { paddingHorizontal: 14, paddingVertical: 14, fontSize: 18, color: colors.muted, backgroundColor: '#F3F4F6', fontWeight: '600' },
   phoneInput: { flex: 1, padding: 14, fontSize: 18, letterSpacing: 0 },
   input: { borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 14, fontSize: 18, backgroundColor: '#fff' },
-  code: { letterSpacing: 10, textAlign: 'center', fontSize: 26 },
+  // No letterSpacing here: iOS reuses text-input views, and wide spacing leaked into other inputs' placeholders.
+  code: { textAlign: 'center', fontSize: 30, fontWeight: '700', fontVariant: ['tabular-nums'] },
   hint: { fontSize: 12, color: colors.muted, marginTop: 8 },
   error: { color: colors.danger, marginTop: 12 },
   button: { backgroundColor: colors.brand, borderRadius: 12, padding: 16, alignItems: 'center', marginTop: 20 },

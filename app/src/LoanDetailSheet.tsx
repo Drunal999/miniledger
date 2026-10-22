@@ -123,7 +123,7 @@ export function LoanDetailSheet({ loanId, token, today, offline, onClose, onChan
             </View>
 
             <View style={styles.card}>
-              <Info label="Lent on" value={prettyDate(loan.createdAt)} />
+              <Info label="Added on" value={prettyDate(loan.createdAt)} />
               <Info label="Due on" value={prettyDate(loan.dueDate)} />
               <View style={styles.infoRow}>
                 <Text style={styles.infoLabel}>Receipt</Text>
