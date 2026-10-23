@@ -6,7 +6,7 @@ Track money you've lent to friends: who owes you, how much, and who's late.
 
 - **API:** Node.js, TypeScript, Hono, Zod, PostgreSQL
 - **App:** React Native (Expo)
-- **Demo video:** _link here_
+- **Demo video:** [watch on Google Drive](https://drive.google.com/file/d/1RxoO5HP1OjOX1vNcbpk97iYnW2uLog2U/view?usp=drivesdk)
 
 <p>
   <img src="docs/screenshots/home.jpg" width="230" alt="Home: what you'll get back, status pills, a part-paid loan with a progress bar">
